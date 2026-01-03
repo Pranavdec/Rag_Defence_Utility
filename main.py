@@ -173,7 +173,8 @@ def cmd_evaluate(args):
     print(f"\nEvaluating: {args.results_file}")
     result = evaluator.evaluate_all(
         args.results_file,
-        use_ragas=not args.no_ragas
+        use_ragas=args.use_ragas,
+        use_deepeval=not args.no_deepeval
     )
     
     # Print results
@@ -243,9 +244,10 @@ def main():
     run_parser.set_defaults(func=cmd_run)
     
     # Evaluate command
-    eval_parser = subparsers.add_parser("evaluate", help="Evaluate results with RAGAS")
+    eval_parser = subparsers.add_parser("evaluate", help="Evaluate results with DeepEval/RAGAS")
     eval_parser.add_argument("results_file", help="Path to results JSON")
-    eval_parser.add_argument("--no-ragas", action="store_true", help="Skip RAGAS eval")
+    eval_parser.add_argument("--use-ragas", action="store_true", help="Enable RAGAS eval")
+    eval_parser.add_argument("--no-deepeval", action="store_true", help="Skip DeepEval eval")
     eval_parser.add_argument("-o", "--output", help="Save evaluation to file")
     eval_parser.set_defaults(func=cmd_evaluate)
     

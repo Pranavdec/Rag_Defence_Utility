@@ -35,7 +35,14 @@ except ImportError:
 
 # Try importing DeepEval
 try:
-    from deepeval.metrics import GEval
+    from deepeval.metrics import (
+        GEval,
+        AnswerRelevancyMetric,
+        FaithfulnessMetric,
+        ContextualRelevancyMetric,
+        ContextualPrecisionMetric,
+        ContextualRecallMetric
+    )
     from deepeval.test_case import LLMTestCase
     from deepeval import evaluate as deepeval_evaluate
     DEEPEVAL_AVAILABLE = True
@@ -229,11 +236,123 @@ class RAGEvaluator:
             traceback.print_exc()
             return {"ragas_error": str(e)}
     
+    def evaluate_with_deepeval(
+        self,
+        results: List[Dict],
+        metrics: Optional[List] = None
+    ) -> Dict[str, float]:
+        """
+        Evaluate using DeepEval metrics with Ollama LLM.
+        
+        Args:
+            results: List of result dicts
+            metrics: List of DeepEval metrics to use (default: RAG standard)
+        """
+        if not DEEPEVAL_AVAILABLE:
+            logger.warning("DeepEval not available, skipping evaluation")
+            return {}
+        
+        # Configure metrics
+        if metrics is None:
+            # Initialize Ollama model
+            # Extract model name from "ollama/llama3" -> "llama3"
+            model_name = self.llm_model.replace("ollama/", "")
+            try:
+                # Late import to avoid top-level dependency issues if not installed
+                from deepeval.models import OllamaModel
+                deepeval_model = OllamaModel(model=model_name)
+            except ImportError:
+                logger.warning("Could not import OllamaModel from deepeval.models. Falling back to default (might fail if API key missing).")
+                deepeval_model = self.llm_model # Fallback to string
+            except Exception as e:
+                logger.error(f"Failed to initialize OllamaModel: {e}")
+                return {"deepeval_error": f"Model init failed: {e}"}
+
+            metrics = [
+                AnswerRelevancyMetric(threshold=0, model=deepeval_model),
+                FaithfulnessMetric(threshold=0, model=deepeval_model),
+                ContextualRelevancyMetric(threshold=0, model=deepeval_model),
+                # ContextualPrecisionMetric(threshold=0, model=deepeval_model),
+                ContextualRecallMetric(threshold=0, model=deepeval_model)
+            ]
+
+        test_cases = []
+        for r in results:
+            test_case = LLMTestCase(
+                input=r.get("question", ""),
+                actual_output=r.get("generated_answer", r.get("answer", "")),
+                expected_output=r.get("ground_truth", ""),
+                retrieval_context=r.get("contexts", [])
+            )
+            test_cases.append(test_case)
+            
+        logger.info(f"Running DeepEval evaluation on {len(test_cases)} samples with {len(metrics)} metrics...")
+        
+        try:
+            eval_results = deepeval_evaluate(test_cases, metrics=metrics)
+            
+            final_metrics = {}
+            metric_sums = {}
+            metric_counts = {}
+            
+            # DeepEval returns an EvaluationResult object with test_results attribute
+            # or the result might be directly iterable
+            test_results = eval_results
+            if hasattr(eval_results, 'test_results'):
+                test_results = eval_results.test_results
+            
+            # Extract scores from each test result
+            for result in test_results:
+                # Try to access metrics_data or metrics_metadata
+                metrics_list = None
+                if hasattr(result, 'metrics_data'):
+                    metrics_list = result.metrics_data
+                elif hasattr(result, 'metrics_metadata'):
+                    metrics_list = result.metrics_metadata
+                elif hasattr(result, 'metrics'):
+                    metrics_list = result.metrics
+                
+                if metrics_list:
+                    for metric_data in metrics_list:
+                        # Extract name and score
+                        name = getattr(metric_data, 'name', None) or getattr(metric_data, 'metric', None) or metric_data.__class__.__name__
+                        score = getattr(metric_data, 'score', None)
+                        
+                        if score is not None and name:
+                            if name not in metric_sums:
+                                metric_sums[name] = 0.0
+                                metric_counts[name] = 0
+                            
+                            metric_sums[name] += float(score)
+                            metric_counts[name] += 1
+            
+            # If still empty, try extracting from the metrics objects directly
+            if not metric_sums:
+                for metric in metrics:
+                    name = getattr(metric, 'name', metric.__class__.__name__)
+                    score = getattr(metric, 'score', None)
+                    if score is not None:
+                        metric_sums[name] = float(score)
+                        metric_counts[name] = 1
+
+            for name, total in metric_sums.items():
+                if metric_counts[name] > 0:
+                    key = f"deepeval_{name.lower().replace(' ', '_')}"
+                    final_metrics[key] = total / metric_counts[name]
+            
+            return final_metrics
+            
+        except Exception as e:
+            logger.error(f"DeepEval evaluation failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return {"deepeval_error": str(e)}
+
     def evaluate_all(
         self,
         results_path: str,
-        use_ragas: bool = True,
-        use_deepeval: bool = False  # Default off as it requires API
+        use_ragas: bool = False,
+        use_deepeval: bool = True
     ) -> EvaluationResult:
         """
         Run all evaluations on a results file.
@@ -266,6 +385,12 @@ class RAGEvaluator:
             ragas_metrics = self.evaluate_with_ragas(results)
             all_metrics.update({f"ragas_{k}": v for k, v in ragas_metrics.items()})
             logger.info(f"RAGAS: {ragas_metrics}")
+            
+        # DeepEval metrics
+        if use_deepeval and DEEPEVAL_AVAILABLE:
+            deepeval_metrics = self.evaluate_with_deepeval(results)
+            all_metrics.update(deepeval_metrics)
+            logger.info(f"DeepEval: {deepeval_metrics}")
         
         # Extract config from results if available
         result_config = data.get("config", {})
