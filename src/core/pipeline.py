@@ -21,6 +21,11 @@ from .generation import OllamaGenerator
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Suppress noisy HTTP and library logs
+logging.getLogger("httpx").setLevel(logging.ERROR)
+logging.getLogger("httpcore").setLevel(logging.ERROR)
+logging.getLogger("chromadb").setLevel(logging.WARNING)
+
 
 def load_config(config_path: str = "config/config.yaml") -> dict:
     """Load configuration from YAML file."""

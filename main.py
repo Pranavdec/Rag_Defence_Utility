@@ -9,7 +9,14 @@ import os
 import sys
 import json
 import yaml
+import logging
 from datetime import datetime
+
+# Suppress noisy HTTP and library logs
+logging.getLogger("httpx").setLevel(logging.ERROR)
+logging.getLogger("chromadb").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.ERROR)
+logging.getLogger("ollama").setLevel(logging.ERROR)
 
 from src.core.retrieval import VectorStore
 from src.core.generation import OllamaGenerator
@@ -80,8 +87,10 @@ def cmd_run(args):
     results = []
     top_k = config["retrieval"]["top_k"]
     
-    for i, qa in enumerate(qa_pairs):
-        print(f"[{i+1}/{len(qa_pairs)}] {qa['question'][:50]}...")
+    print("\nProcessing questions...")
+    for i, qa in enumerate(qa_pairs, 1):
+        # Clean progress indicator
+        print(f"\rProgress: {i}/{len(qa_pairs)} ({i*100//len(qa_pairs)}%)", end="", flush=True)
         
         # Retrieve
         retrieved = vs.query(qa["question"], top_k=top_k)
@@ -99,6 +108,7 @@ def cmd_run(args):
             "latency_ms": gen_result["latency_ms"],
             "metadata": qa.get("metadata", {})
         })
+    print()  # New line after progress
     
     # Save results
     os.makedirs(config["paths"]["results"], exist_ok=True)

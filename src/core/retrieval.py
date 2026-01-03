@@ -11,6 +11,11 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Suppress noisy HTTP and library logs
+logging.getLogger("httpx").setLevel(logging.ERROR)
+logging.getLogger("httpcore").setLevel(logging.ERROR)
+logging.getLogger("chromadb").setLevel(logging.WARNING)
+
 
 class LocalEmbedder:
     """Fast local embeddings using sentence-transformers (supports batching)."""
@@ -25,14 +30,14 @@ class LocalEmbedder:
         embeddings = self.model.encode(
             texts, 
             batch_size=batch_size,
-            show_progress_bar=True,
+            show_progress_bar=False,
             convert_to_numpy=True
         )
         return embeddings.tolist()
     
     def embed_single(self, text: str) -> List[float]:
         """Embed a single text."""
-        return self.model.encode(text).tolist()
+        return self.model.encode(text, show_progress_bar=False).tolist()
 
 
 class VectorStore:
