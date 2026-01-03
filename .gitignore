@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.env
+.ipynb_checkpoints/
+
+# IDEs
+.vscode/
+.idea/
+
+# Project Data (Local)
+data/raw/
+data/chroma_db/
+data/qa_pairs/
+data/results/
+data/metrics/
+
+# Logs
+*.log

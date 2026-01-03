@@ -1,0 +1,26 @@
+# RAG Defence Utility Configuration
+
+system:
+  embedding_model: "all-MiniLM-L6-v2"  # Fast local embedding model
+  llm:
+    model_name: "llama3"
+    temperature: 0.0
+  judge_llm: "llama3"  # LLM for evaluation metrics (RAGAS/DeepEval)
+
+paths:
+  chroma_db: "data/chroma_db"
+  results: "data/results"
+  cache: "data/raw"
+
+# Data loading parameters
+data:
+  ingestion_size: 500   # Number of QA pairs to load (index their gold passages)
+  ingestion_seed: 42    # Random seed for selecting ingestion samples
+  test_size: 1         # Number of those to use for final metrics
+  test_seed: 123        # Random seed for selecting test samples
+
+# Retrieval parameters
+retrieval:
+  top_k: 5
+  chunk_size: 512
+  chunk_overlap: 50
