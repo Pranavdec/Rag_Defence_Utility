@@ -144,7 +144,7 @@ class VectorStore:
                 "content": docs[i],
                 "metadata": metas[i] if metas else {},
                 "distance": dists[i] if dists else None,
-                "embedding": embeddings[i] if embeddings else None
+                "embedding": embeddings[i] if embeddings is not None and len(embeddings) > 0 else None
             })
         
         return formatted

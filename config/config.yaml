@@ -33,12 +33,32 @@ retrieval:
 defenses:
   - name: "differential_privacy"
     enabled: false
-    method: "dp_pure"  # Options: "dp_pure", "dp_approx"
-    epsilon: 1.0       # Privacy budget
-    delta: 0.01        # For approximate DP
-    candidate_multiplier: 3 # Fetch 3x top_k candidates for DP filtering
+    # Mechanism: "dp_pure" (exponential) or "dp_approx" (gaussian)
+    method: "dp_pure"
+    # Privacy budget (lower = more privacy/noise)
+    epsilon: 1.0
+    # Failure probability for approximate DP (should be < 1/dataset_size)
+    delta: 0.01
+    # Multiplier to fetch extra docs before DP filtering (e.g. 3 * top_k)
+    candidate_multiplier: 3
 
   - name: "trustrag"
-    enabled: true
+    enabled: false
+    # Cosine similarity threshold: if cluster internal similarity > this, it's considered malicious
     similarity_threshold: 0.88
+    # ROUGE-L threshold for removing near-duplicate documents within clusters
     rouge_threshold: 0.25
+
+  - name: "attention_filtering"
+    enabled: true
+    # Hugging Face model ID for attention extraction. ensure access with `hf auth login`
+    model_path: "meta-llama/Llama-3.1-8B-Instruct" 
+    # Number of top tokens to aggregate attention over for each passage
+    top_tokens: 100
+    # Maximum number of passages to filter out (remove highest attention magnitude ones)
+    max_corruptions: 3
+    # Variance threshold; if attention variance is lower than this, stop filtering
+    short_answer_threshold: 50
+    # Device to run the model on: "cuda" or "cpu". Use "cpu" if running OOM on GPU with Ollama.
+    device: "cpu"
+

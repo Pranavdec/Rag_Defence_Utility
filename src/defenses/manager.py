@@ -3,12 +3,15 @@ from typing import List, Dict, Any, Tuple
 from .base import BaseDefense
 from .dp_rag import DifferentialPrivacyDefense
 from .trustrag import TrustRAGDefense
+from .av_defense import AttentionFilteringDefense
 
 # Registry of available defenses
 DEFENSE_REGISTRY = {
     "differential_privacy": DifferentialPrivacyDefense,
     "trustrag": TrustRAGDefense,
+    "attention_filtering": AttentionFilteringDefense,
 }
+
 
 logger = logging.getLogger(__name__)
 
