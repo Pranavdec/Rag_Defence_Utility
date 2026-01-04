@@ -16,7 +16,7 @@ from ..data_loaders.nq_loader import NQLoader
 from ..data_loaders.pubmed_loader import PubMedLoader
 from ..data_loaders.trivia_loader import TriviaLoader
 from .retrieval import VectorStore
-from .generation import OllamaGenerator
+from .generation import create_generator
 from ..defenses.manager import DefenseManager
 
 logging.basicConfig(level=logging.INFO)
@@ -52,8 +52,8 @@ class ModularRAG:
     
     Supports:
     - Ingestion from multiple data sources
-    - Retrieval using ChromaDB + Ollama embeddings
-    - Generation using Ollama LLM
+    - Retrieval using ChromaDB with local embeddings
+    - Generation using HuggingFace (default) or Ollama LLM
     - Result logging for evaluation
     """
     
@@ -74,13 +74,7 @@ class ModularRAG:
         # Ensure results directory exists
         os.makedirs(self.results_path, exist_ok=True)
         
-        # Initialize generator
-        self.generator = OllamaGenerator(
-            model_name=self.llm_model,
-            temperature=self.temperature
-        )
-        
-        # Initialize Defense Manager
+        # Initialize Defense Manager FIRST (so it can be passed to generator)
         # Support both old 'defense' (dict) and new 'defenses' (list) config
         defense_config = self.config.get("defenses", [])
         if not defense_config and "defense" in self.config:
@@ -91,6 +85,9 @@ class ModularRAG:
                 defense_config = [old_conf]
         
         self.defense_manager = DefenseManager(defense_config)
+        
+        # Initialize generator (with potential model sharing from AV defense)
+        self.generator = create_generator(self.config, defense_manager=self.defense_manager)
         
         # Vector store will be initialized per dataset
         self.vector_store: Optional[VectorStore] = None

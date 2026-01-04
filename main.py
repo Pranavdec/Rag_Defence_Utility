@@ -19,7 +19,7 @@ logging.getLogger("httpcore").setLevel(logging.ERROR)
 logging.getLogger("ollama").setLevel(logging.ERROR)
 
 from src.core.retrieval import VectorStore
-from src.core.generation import OllamaGenerator
+from src.core.generation import create_generator
 from src.defenses.manager import DefenseManager
 
 
@@ -78,13 +78,7 @@ def cmd_run(args):
     
     print(f"Using collection: {collection_name} ({vs.collection.count()} chunks)")
     
-    # Initialize generator
-    gen = OllamaGenerator(
-        model_name=config["system"]["llm"]["model_name"],
-        temperature=config["system"]["llm"]["temperature"]
-    )
-
-    # Initialize Defense Manager
+    # Initialize Defense Manager FIRST (for potential model sharing)
     defense_config = config.get("defenses", [])
     if not defense_config and "defense" in config:
         old_conf = config["defense"]
@@ -93,6 +87,9 @@ def cmd_run(args):
             defense_config = [old_conf]
     
     defense_manager = DefenseManager(defense_config)
+    
+    # Initialize generator (with potential model sharing)
+    gen = create_generator(config, defense_manager=defense_manager)
     
     # Run retrieval + generation
     results = []
@@ -106,14 +103,20 @@ def cmd_run(args):
         # Defense Pre-Retrieval
         query_text, fetch_k = defense_manager.apply_pre_retrieval(qa["question"], top_k)
 
-        # Retrieve
+        # Retrieve (only include embeddings if needed by defenses)
         retrieved = vs.query(
             query_text, 
-            top_k=fetch_k
+            top_k=fetch_k,
+            include_embeddings=defense_manager.needs_embeddings
         )
         
         # Defense Post-Retrieval
         retrieved = defense_manager.apply_post_retrieval(retrieved, qa["question"])
+        
+        # Safety check: ensure at most top_k documents before generation
+        if len(retrieved) > top_k:
+            print(f"\n⚠ Warning: {len(retrieved)} documents after defenses, capping to top_k={top_k}")
+            retrieved = retrieved[:top_k]
         
         contexts = [r["content"] for r in retrieved]
         
@@ -153,6 +156,15 @@ def cmd_run(args):
     # Calculate summary stats
     avg_latency = sum(r["latency_ms"] for r in results) / len(results)
     
+    # Get model name from config (handle both legacy and new format)
+    llm_config = config["system"]["llm"]
+    if "model_path" in llm_config:
+        model_name = llm_config["model_path"]
+    elif "model_name" in llm_config:
+        model_name = llm_config["model_name"]
+    else:
+        model_name = "unknown"
+    
     output_data = {
         "dataset": dataset,
         "timestamp": timestamp,
@@ -161,7 +173,7 @@ def cmd_run(args):
             "runtime_params": {
                 "test_size": len(results),
                 "top_k": top_k,
-                "model": config["system"]["llm"]["model_name"]
+                "model": model_name
             }
         },
         "summary": {

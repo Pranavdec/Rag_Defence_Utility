@@ -19,6 +19,17 @@ class TrustRAGDefense(BaseDefense):
         super().__init__(config)
         self.similarity_threshold = config.get("similarity_threshold", 0.88)
         self.rouge_threshold = config.get("rouge_threshold", 0.25)
+        self.candidate_multiplier = config.get("candidate_multiplier", 3)
+        self.target_top_k = 5  # Will be updated in pre_retrieval
+
+    def pre_retrieval(self, query: str, top_k: int) -> Tuple[str, int]:
+        """
+        Request more candidates than needed to allow for TrustRAG filtering.
+        """
+        self.target_top_k = top_k
+        fetch_k = top_k * self.candidate_multiplier
+        logger.info(f"[TrustRAG] Increasing retrieval limit from {top_k} to {fetch_k}")
+        return query, fetch_k
 
     def post_retrieval(self, documents: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
         """
@@ -62,6 +73,8 @@ class TrustRAGDefense(BaseDefense):
                 logger.warning(f"[TrustRAG] Filtered text not found in original documents: {text[:50]}...")
                 
         logger.info(f"[TrustRAG] Filtered {len(documents)} -> {len(filtered_docs)} docs")
+        
+        # Return filtered docs (will be limited to top_k by manager)
         return filtered_docs
 
     def trustrag_kmeans_filter(self, documents, embeddings, similarity_threshold=0.88, rouge_threshold=0.25):

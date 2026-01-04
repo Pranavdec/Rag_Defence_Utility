@@ -71,8 +71,9 @@ class DifferentialPrivacyDefense(BaseDefense):
         
         logger.info(f"[DP Defense] Filtered {len(documents)} -> {len(filtered_docs)} docs")
         
-        # Return top k of the filtered set
-        return filtered_docs[:self.target_top_k]
+        # Return filtered docs without limiting - manager will cap at top_k after all defenses
+        # This allows documents to flow freely to next defense in stacked configuration
+        return filtered_docs
 
     def _sample_dp_threshold_pure(self, scores: np.ndarray, k: int, 
                                  epsilon: float, min_score: float = -1.0, 

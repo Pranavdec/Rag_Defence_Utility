@@ -34,6 +34,8 @@ class AttentionFilteringDefense(BaseDefense):
         self.top_tokens = int(config.get("top_tokens", 100))
         self.max_corruptions = int(config.get("max_corruptions", 3))
         self.short_answer_threshold = int(config.get("short_answer_threshold", 50))
+        self.candidate_multiplier = config.get("candidate_multiplier", 3)
+        self.target_top_k = 5  # Will be updated in pre_retrieval
         
         # Model config wrapper
         model_config = {
@@ -62,9 +64,12 @@ class AttentionFilteringDefense(BaseDefense):
 
     def pre_retrieval(self, query: str, top_k: int) -> Tuple[str, int]:
         """
-        Pass-through.
+        Request more candidates than needed to allow for attention filtering.
         """
-        return query, top_k
+        self.target_top_k = top_k
+        fetch_k = top_k * self.candidate_multiplier
+        logger.info(f"[AV Defense] Increasing retrieval limit from {top_k} to {fetch_k}")
+        return query, fetch_k
 
     def post_retrieval(self, documents: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
         """
@@ -74,6 +79,9 @@ class AttentionFilteringDefense(BaseDefense):
             return []
             
         original_contents = [d.get("content", "") for d in documents]
+
+        if len(original_contents) >= self.target_top_k * self.candidate_multiplier:
+            original_contents = original_contents[:self.target_top_k * self.candidate_multiplier]
         
         # If any content is empty, just return docs to avoid errors
         if not all(original_contents):
@@ -97,6 +105,9 @@ class AttentionFilteringDefense(BaseDefense):
             filtered_docs = [d for d in documents if d.get("content") in filtered_contents]
             
             logger.info(f"[AV Defense] Retained {len(filtered_docs)}/{len(documents)} documents.")
+            
+            # Return filtered docs without limiting - manager will cap at top_k after all defenses
+            # This allows documents to flow freely to next defense in stacked configuration
             return filtered_docs
             
         except Exception as e:

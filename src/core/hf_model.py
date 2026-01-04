@@ -66,17 +66,20 @@ class Llama(Model):
         # Ensure input is on correct device
         inputs = self.tokenizer(msg, padding=True, return_tensors="pt").to(self.model.device)
         input_ids = inputs['input_ids']
+        attention_mask = inputs['attention_mask']
 
         with torch.no_grad():
+            # When do_sample=False, we don't need temperature or top_p
+            # This avoids warnings about incompatible generation flags
             outputs = self.model.generate(
                 input_ids,
-                temperature=self.temperature if self.temperature > 0 else 1.0, # Avoid 0 temp error in HF
+                attention_mask=attention_mask,
+                pad_token_id=self.tokenizer.eos_token_id,
                 max_new_tokens=self.max_output_tokens,
-                # early_stopping=True, # Deprecated/warns in some versions depending on beam search
                 output_attentions=True,
                 return_dict_in_generate=True,
                 use_cache=True,
-                do_sample=False, # Deterministic if temp=0 equivalent
+                do_sample=False, # Deterministic greedy decoding
             )
 
         out = self.tokenizer.decode(outputs.sequences[0], skip_special_tokens=True)
@@ -134,7 +137,11 @@ class Llama(Model):
                 # formatting: (layers, batch, head, seq_len)
                 
                 attention_scores = attention_tensor.mean(dim=0) # Average over layers -> (batch, head, seq_len)
-                avg_attention = attention_scores.mean(dim=1)[0] # Average over heads -> (seq_len)
+                avg_attention = attention_scores.mean(dim=1) # Average over heads -> (batch, seq_len)
+                
+                # Extract first (and only) batch element
+                if avg_attention.dim() > 1:
+                    avg_attention = avg_attention[0]
                 
                 # We care about attention to INPUT tokens
                 token_attention = avg_attention[:input_ids.shape[1]]
@@ -145,7 +152,12 @@ class Llama(Model):
                 current_values = []
                 for j in range(len(input_tokens)):
                     if j < len(token_attention):
-                         val = token_attention[j].item()
+                         # Check if the value is a tensor and convert to scalar
+                         att_val = token_attention[j]
+                         if isinstance(att_val, torch.Tensor):
+                             val = att_val.item()
+                         else:
+                             val = float(att_val)
                          # Zero out punctuation attention
                          if input_tokens[j] in punctuation_set:
                              val = 0

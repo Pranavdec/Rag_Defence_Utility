@@ -118,18 +118,29 @@ class VectorStore:
     def query(
         self,
         query_text: str,
-        top_k: int = 5
+        top_k: int = 5,
+        include_embeddings: bool = False
     ) -> List[dict]:
         """
         Query the vector store for similar documents.
         Returns list of dicts with 'content', 'metadata', 'distance'.
+        
+        Args:
+            query_text: The query string
+            top_k: Number of documents to retrieve
+            include_embeddings: Whether to include embeddings in results (needed by some defenses)
         """
         query_embedding = self.embedder.embed_single(query_text)
+        
+        # Only include embeddings if needed (significantly improves performance when not needed)
+        include_fields = ["documents", "metadatas", "distances"]
+        if include_embeddings:
+            include_fields.append("embeddings")
         
         results = self.collection.query(
             query_embeddings=[query_embedding],
             n_results=top_k,
-            include=["documents", "metadatas", "distances", "embeddings"]
+            include=include_fields
         )
         
         docs = results["documents"][0] if results["documents"] else []

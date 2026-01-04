@@ -30,6 +30,7 @@ class DefenseManager:
                    [{'name': 'differential_privacy', 'method': 'dp_pure', ...}]
         """
         self.defenses: List[BaseDefense] = []
+        self.needs_embeddings = False
         
         if not config:
             return
@@ -47,27 +48,97 @@ class DefenseManager:
                         defense_instance = defense_class(defense_conf)
                         self.defenses.append(defense_instance)
                         logger.info(f"Defense initialized: {name}")
+                        # TrustRAG needs embeddings for clustering
+                        if name == "trustrag":
+                            self.needs_embeddings = True
                     except Exception as e:
                         logger.error(f"Failed to initialize defense {name}: {e}")
             else:
                 logger.warning(f"Unknown defense type: {name}")
 
     def apply_pre_retrieval(self, query: str, top_k: int) -> Tuple[str, int]:
-        """Apply all pre-retrieval hooks sequentially."""
+        """
+        Apply all pre-retrieval hooks.
+        - Query modifications are applied sequentially
+        - fetch_k calculation:
+          * Single defense: fetch_k = top_k * multiplier
+          * Stacked defenses: fetch_k = top_k * multiplier1 * (multiplier2/num_defenses) * (multiplier3/num_defenses) ...
+            This ensures sufficient documents flow through all defense stages while avoiding excessive retrieval.
+        - target_top_k for DP Defense only: Set higher intermediate target for DP if stacked
+        """
         current_query = query
-        current_fetch_k = top_k
+        num_defenses = len(self.defenses)
         
+        # Special handling for DP Defense target_top_k in stacked configuration
+        # DP uses target_top_k in its algorithm, so it needs to aim higher when not the last defense
+        if num_defenses > 1:
+            for idx, defense in enumerate(self.defenses):
+                if hasattr(defense, 'target_top_k') and defense.__class__.__name__ == 'DifferentialPrivacyDefense':
+                    remaining_defenses = num_defenses - idx - 1
+                    if remaining_defenses > 0:
+                        # DP not last: target more docs (e.g., 2x top_k for downstream filtering)
+                        defense.target_top_k = top_k * 2
+                        logger.info(f"[Manager] DP at position {idx+1}/{num_defenses}: target_top_k={defense.target_top_k}")
+                    else:
+                        # DP is last: target final top_k
+                        defense.target_top_k = top_k
+        else:
+            # Single defense: use final top_k
+            for defense in self.defenses:
+                if hasattr(defense, 'target_top_k'):
+                    defense.target_top_k = top_k
+        
+        # Apply query modifications sequentially
         for defense in self.defenses:
-            current_query, current_fetch_k = defense.pre_retrieval(current_query, current_fetch_k)
+            current_query, _ = defense.pre_retrieval(current_query, top_k)
+        
+        # Calculate fetch_k based on single vs stacked defense logic
+        if len(self.defenses) == 0:
+            fetch_k = top_k
+        elif len(self.defenses) == 1:
+            # Single defense: use its multiplier directly
+            _, fetch_k = self.defenses[0].pre_retrieval(query, top_k)
+        else:
+            # Stacked defenses: cascading multiplier formula
+            # fetch_k = top_k * multiplier1 * (multiplier2/n) * (multiplier3/n) ...
+            fetch_k = top_k
             
-        return current_query, current_fetch_k
+            for idx, defense in enumerate(self.defenses):
+                _, defense_fetch_k = defense.pre_retrieval(query, top_k)
+                multiplier = defense_fetch_k / top_k if top_k > 0 else 1.0
+                
+                if idx == 0:
+                    # First defense multiplier applied directly
+                    fetch_k = fetch_k * multiplier
+                else:
+                    # Subsequent defenses: divide by num_defenses
+                    fetch_k = fetch_k * (multiplier / num_defenses)
+            
+            fetch_k = int(fetch_k)
+            
+        logger.info(f"[Manager] Pre-retrieval: top_k={top_k}, fetch_k={fetch_k}, num_defenses={len(self.defenses)}")
+        return current_query, fetch_k
 
     def apply_post_retrieval(self, documents: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
-        """Apply all post-retrieval hooks sequentially."""
+        """
+        Apply all post-retrieval hooks sequentially.
+        Documents flow through each defense without intermediate limiting.
+        Final cap at top_k happens only after all defenses have processed.
+        """
         current_docs = documents
         
+        # Sequential filtering through all defenses - no intermediate limiting
         for defense in self.defenses:
             current_docs = defense.post_retrieval(current_docs, query)
+        
+        # Final limit to top_k after all defenses have filtered
+        # Use target_top_k from any defense (they should all be consistent with global top_k)
+        if self.defenses and len(current_docs) > 0:
+            if hasattr(self.defenses[0], 'target_top_k'):
+                target_top_k = self.defenses[0].target_top_k
+                if len(current_docs) > target_top_k:
+                    logger.info(f"[Manager] Final limiting: {len(current_docs)} documents -> top_k={target_top_k}")
+                    current_docs = current_docs[:target_top_k]
             
         return current_docs
 
@@ -93,3 +164,16 @@ class DefenseManager:
             current_response = defense.post_generation(current_response)
             
         return current_response
+
+    def get_shared_av_model(self):
+        """
+        Get the Llama model instance from AttentionFilteringDefense if enabled.
+        This allows sharing the model with the generator to save GPU memory.
+        
+        Returns:
+            Llama model instance or None
+        """
+        for defense in self.defenses:
+            if isinstance(defense, AttentionFilteringDefense):
+                return defense.llm
+        return None
