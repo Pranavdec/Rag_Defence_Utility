@@ -52,6 +52,8 @@ except ImportError:
 
 from .custom_metrics import detect_refusal_simple
 
+os.environ["DEEPEVAL_PER_TASK_TIMEOUT_SECONDS_OVERRIDE"] = "6000"
+os.environ["DEEPEVAL_PER_ATTEMPT_TIMEOUT_SECONDS_OVERRIDE"] = "300"
 
 @dataclass
 class EvaluationResult:
@@ -239,7 +241,8 @@ class RAGEvaluator:
     def evaluate_with_deepeval(
         self,
         results: List[Dict],
-        metrics: Optional[List] = None
+        metrics: Optional[List] = None,
+        max_concurrent: int = 5
     ) -> Dict[str, float]:
         """
         Evaluate using DeepEval metrics with Ollama LLM.
@@ -247,6 +250,7 @@ class RAGEvaluator:
         Args:
             results: List of result dicts
             metrics: List of DeepEval metrics to use (default: RAG standard)
+            max_concurrent: Maximum number of concurrent evaluations (default: 5)
         """
         if not DEEPEVAL_AVAILABLE:
             logger.warning("DeepEval not available, skipping evaluation")
@@ -287,9 +291,24 @@ class RAGEvaluator:
             test_cases.append(test_case)
             
         logger.info(f"Running DeepEval evaluation on {len(test_cases)} samples with {len(metrics)} metrics...")
+        logger.info(f"Using max_concurrent={max_concurrent} for parallel evaluation")
         
         try:
-            eval_results = deepeval_evaluate(test_cases, metrics=metrics)
+            # Import AsyncConfig to control parallelization
+            from deepeval.evaluate.configs import AsyncConfig
+            
+            # Configure async settings to reduce parallelization
+            async_config = AsyncConfig(
+                run_async=True,
+                max_concurrent=max_concurrent,
+                throttle_value=0
+            )
+            
+            eval_results = deepeval_evaluate(
+                test_cases, 
+                metrics=metrics,
+                async_config=async_config
+            )
             
             final_metrics = {}
             metric_sums = {}
@@ -352,7 +371,8 @@ class RAGEvaluator:
         self,
         results_path: str,
         use_ragas: bool = False,
-        use_deepeval: bool = True
+        use_deepeval: bool = True,
+        deepeval_max_concurrent: int = 5
     ) -> EvaluationResult:
         """
         Run all evaluations on a results file.
@@ -361,6 +381,7 @@ class RAGEvaluator:
             results_path: Path to the results JSON file
             use_ragas: Whether to run RAGAS metrics
             use_deepeval: Whether to run DeepEval metrics
+            deepeval_max_concurrent: Max concurrent evaluations for DeepEval
         """
         data = self.load_results(results_path)
         results = data.get("results", [])
@@ -388,7 +409,10 @@ class RAGEvaluator:
             
         # DeepEval metrics
         if use_deepeval and DEEPEVAL_AVAILABLE:
-            deepeval_metrics = self.evaluate_with_deepeval(results)
+            deepeval_metrics = self.evaluate_with_deepeval(
+                results, 
+                max_concurrent=deepeval_max_concurrent
+            )
             all_metrics.update(deepeval_metrics)
             logger.info(f"DeepEval: {deepeval_metrics}")
         

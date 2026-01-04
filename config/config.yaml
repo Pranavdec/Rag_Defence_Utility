@@ -14,10 +14,14 @@ paths:
 
 # Data loading parameters
 data:
-  ingestion_size: 500   # Number of QA pairs to load (index their gold passages)
+  ingestion_size: 10000   # Number of QA pairs to load (index their gold passages)
   ingestion_seed: 42    # Random seed for selecting ingestion samples
-  test_size: 1         # Number of those to use for final metrics
+  test_size: 50         # Number of those to use for final metrics
   test_seed: 123        # Random seed for selecting test samples
+
+# Evaluation parameters
+evaluation:
+  deepeval_max_concurrent: 5  # Max concurrent evaluations for DeepEval (reduce to avoid overloading Ollama)
 
 # Retrieval parameters
 retrieval:

@@ -169,12 +169,16 @@ def cmd_evaluate(args):
         embedding_model=config["system"]["embedding_model"]
     )
     
+    # Get evaluation config
+    deepeval_max_concurrent = config.get("evaluation", {}).get("deepeval_max_concurrent", 5)
+    
     # Run evaluation
     print(f"\nEvaluating: {args.results_file}")
     result = evaluator.evaluate_all(
         args.results_file,
         use_ragas=args.use_ragas,
-        use_deepeval=not args.no_deepeval
+        use_deepeval=not args.no_deepeval,
+        deepeval_max_concurrent=deepeval_max_concurrent
     )
     
     # Print results
