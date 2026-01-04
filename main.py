@@ -93,7 +93,11 @@ def cmd_run(args):
         print(f"\rProgress: {i}/{len(qa_pairs)} ({i*100//len(qa_pairs)}%)", end="", flush=True)
         
         # Retrieve
-        retrieved = vs.query(qa["question"], top_k=top_k)
+        retrieved = vs.query(
+            qa["question"], 
+            top_k=top_k,
+            defense_config=config.get("defense")
+        )
         contexts = [r["content"] for r in retrieved]
         
         # Generate
