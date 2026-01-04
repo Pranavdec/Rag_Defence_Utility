@@ -20,6 +20,7 @@ logging.getLogger("ollama").setLevel(logging.ERROR)
 
 from src.core.retrieval import VectorStore
 from src.core.generation import OllamaGenerator
+from src.defenses.manager import DefenseManager
 
 
 def load_config():
@@ -82,6 +83,16 @@ def cmd_run(args):
         model_name=config["system"]["llm"]["model_name"],
         temperature=config["system"]["llm"]["temperature"]
     )
+
+    # Initialize Defense Manager
+    defense_config = config.get("defenses", [])
+    if not defense_config and "defense" in config:
+        old_conf = config["defense"]
+        if old_conf and old_conf.get("method"):
+            old_conf["name"] = "differential_privacy"
+            defense_config = [old_conf]
+    
+    defense_manager = DefenseManager(defense_config)
     
     # Run retrieval + generation
     results = []
@@ -92,16 +103,36 @@ def cmd_run(args):
         # Clean progress indicator
         print(f"\rProgress: {i}/{len(qa_pairs)} ({i*100//len(qa_pairs)}%)", end="", flush=True)
         
+        # Defense Pre-Retrieval
+        query_text, fetch_k = defense_manager.apply_pre_retrieval(qa["question"], top_k)
+
         # Retrieve
         retrieved = vs.query(
-            qa["question"], 
-            top_k=top_k,
-            defense_config=config.get("defense")
+            query_text, 
+            top_k=fetch_k
         )
+        
+        # Defense Post-Retrieval
+        retrieved = defense_manager.apply_post_retrieval(retrieved, qa["question"])
+        
         contexts = [r["content"] for r in retrieved]
         
+        # Defense Pre-Generation
+        sys_p, user_p, mod_contexts = defense_manager.apply_pre_generation(
+            system_prompt="",
+            user_prompt=qa["question"],
+            contexts=contexts
+        )
+        
         # Generate
-        gen_result = gen.generate(qa["question"], contexts)
+        gen_result = gen.generate(
+            question=user_p, 
+            contexts=mod_contexts,
+            system_prompt=sys_p if sys_p else None
+        )
+        
+        # Defense Post-Generation
+        gen_result["answer"] = defense_manager.apply_post_generation(gen_result["answer"])
         
         results.append({
             "pair_id": qa["pair_id"],

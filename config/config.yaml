@@ -30,8 +30,10 @@ retrieval:
   chunk_overlap: 50
 
 # Defense parameters
-defense:
-  method: null  # Options: null, "dp_pure", "dp_approx"
-  epsilon: 1.0  # Privacy budget
-  delta: 0.01   # For approximate DP
-  candidate_multiplier: 3 # Fetch 3x top_k candidates for DP filtering
+defenses:
+  - name: "differential_privacy"
+    enabled: true
+    method: "dp_pure"  # Options: "dp_pure", "dp_approx"
+    epsilon: 1.0       # Privacy budget
+    delta: 0.01        # For approximate DP
+    candidate_multiplier: 3 # Fetch 3x top_k candidates for DP filtering

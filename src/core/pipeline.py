@@ -17,6 +17,7 @@ from ..data_loaders.pubmed_loader import PubMedLoader
 from ..data_loaders.trivia_loader import TriviaLoader
 from .retrieval import VectorStore
 from .generation import OllamaGenerator
+from ..defenses.manager import DefenseManager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -78,6 +79,18 @@ class ModularRAG:
             model_name=self.llm_model,
             temperature=self.temperature
         )
+        
+        # Initialize Defense Manager
+        # Support both old 'defense' (dict) and new 'defenses' (list) config
+        defense_config = self.config.get("defenses", [])
+        if not defense_config and "defense" in self.config:
+            # Migration path: wrap old single defense config in list
+            old_conf = self.config["defense"]
+            if old_conf and old_conf.get("method"):
+                old_conf["name"] = "differential_privacy" # Map old generic defense to specific one
+                defense_config = [old_conf]
+        
+        self.defense_manager = DefenseManager(defense_config)
         
         # Vector store will be initialized per dataset
         self.vector_store: Optional[VectorStore] = None
@@ -173,12 +186,52 @@ class ModularRAG:
         if self.vector_store is None:
             raise RuntimeError("No dataset ingested. Call ingest() first.")
         
+        # Defense Pre-Retrieval
+        query_text, fetch_k = self.defense_manager.apply_pre_retrieval(question, self.top_k)
+        
         # Retrieve
-        retrieved = self.vector_store.query(question, top_k=self.top_k)
+        retrieved = self.vector_store.query(query_text, top_k=fetch_k)
+        
+        # Defense Post-Retrieval
+        retrieved = self.defense_manager.apply_post_retrieval(retrieved, question)
+        
         contexts = [r["content"] for r in retrieved]
         
+        # Defense Pre-Generation
+        # Default system prompt is None in generator, but we can pass one if defense wants to inject
+        system_prompt = None 
+        # But wait, generator.generate takes system_prompt.
+        # We need to construct user_prompt too? 
+        # Actually generator.generate constructs user prompt from context+question.
+        # Defense might want to modify the QUESTION that goes into prompt? or the CONTEXTS?
+        
+        # My BaseDefense.pre_generation signature is (system_prompt, user_prompt, contexts)
+        # But generator builds the prompt internally. 
+        # I should probably update generator to accept inputs more flexibly, OR
+        # I can just pass modified contexts and question?
+        # The user wanted "post-gen defense".
+        # Let's see what base.py says: pre_generation(system_prompt, user_prompt, contexts)
+        # Here I have `question` and `contexts`.
+        # I can pass `question` as `user_prompt` effectively for now.
+        
+        sys_p, user_p, mod_contexts = self.defense_manager.apply_pre_generation(
+            system_prompt="", # Default empty
+            user_prompt=question,
+            contexts=contexts
+        )
+        
+        # Generator expects question. If user_p changed, we treat it as new question.
+        # If sys_p changed, we pass it.
+        
         # Generate
-        result = self.generator.generate(question, contexts)
+        result = self.generator.generate(
+            question=user_p, 
+            contexts=mod_contexts,
+            system_prompt=sys_p if sys_p else None
+        )
+        
+        # Defense Post-Generation
+        result["answer"] = self.defense_manager.apply_post_generation(result["answer"])
         
         return {
             "question": question,
