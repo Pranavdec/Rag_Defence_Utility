@@ -372,7 +372,8 @@ class RAGEvaluator:
         results_path: str,
         use_ragas: bool = False,
         use_deepeval: bool = True,
-        deepeval_max_concurrent: int = 5
+        deepeval_max_concurrent: int = 5,
+        evaluation_config: Optional[Dict[str, Any]] = None
     ) -> EvaluationResult:
         """
         Run all evaluations on a results file.
@@ -382,6 +383,7 @@ class RAGEvaluator:
             use_ragas: Whether to run RAGAS metrics
             use_deepeval: Whether to run DeepEval metrics
             deepeval_max_concurrent: Max concurrent evaluations for DeepEval
+            evaluation_config: Optional dictionary containing evaluation-time configuration
         """
         data = self.load_results(results_path)
         results = data.get("results", [])
@@ -417,8 +419,20 @@ class RAGEvaluator:
             logger.info(f"DeepEval: {deepeval_metrics}")
         
         # Extract config from results if available
+        # This is the config used during INFERENCE (retrieval/generation)
         result_config = data.get("config", {})
-        # Add evaluation-specific config
+        
+        # Add evaluation-specific config if provided
+        if evaluation_config:
+            # We can either merge it at the top level or add a subsection
+            # Adding a subsection is safer to distinguish inference vs evaluation params
+            result_config["evaluation_config"] = evaluation_config
+            
+            # Also ensure specific params used are reflected
+            if "evaluation" not in result_config:
+                result_config["evaluation"] = {}
+            result_config["evaluation"]["deepeval_max_concurrent"] = deepeval_max_concurrent
+        
         result_config["judge_llm"] = self.llm_model
         
         return EvaluationResult(

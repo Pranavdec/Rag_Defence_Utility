@@ -182,7 +182,8 @@ def cmd_evaluate(args):
         args.results_file,
         use_ragas=args.use_ragas,
         use_deepeval=not args.no_deepeval,
-        deepeval_max_concurrent=deepeval_max_concurrent
+        deepeval_max_concurrent=deepeval_max_concurrent,
+        evaluation_config=config
     )
     
     # Print results
