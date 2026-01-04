@@ -1,12 +1,13 @@
 import logging
 from typing import List, Dict, Any, Tuple
 from .base import BaseDefense
-from .retrieval_defenses import DifferentialPrivacyDefense
+from .dp_rag import DifferentialPrivacyDefense
+from .trustrag import TrustRAGDefense
 
 # Registry of available defenses
 DEFENSE_REGISTRY = {
     "differential_privacy": DifferentialPrivacyDefense,
-    # Add new defenses here
+    "trustrag": TrustRAGDefense,
 }
 
 logger = logging.getLogger(__name__)

@@ -32,8 +32,13 @@ retrieval:
 # Defense parameters
 defenses:
   - name: "differential_privacy"
-    enabled: true
+    enabled: false
     method: "dp_pure"  # Options: "dp_pure", "dp_approx"
     epsilon: 1.0       # Privacy budget
     delta: 0.01        # For approximate DP
     candidate_multiplier: 3 # Fetch 3x top_k candidates for DP filtering
+
+  - name: "trustrag"
+    enabled: true
+    similarity_threshold: 0.88
+    rouge_threshold: 0.25

@@ -129,12 +129,13 @@ class VectorStore:
         results = self.collection.query(
             query_embeddings=[query_embedding],
             n_results=top_k,
-            include=["documents", "metadatas", "distances"]
+            include=["documents", "metadatas", "distances", "embeddings"]
         )
         
         docs = results["documents"][0] if results["documents"] else []
         metas = results["metadatas"][0] if results["metadatas"] else []
         dists = results["distances"][0] if results["distances"] else []
+        embeddings = results["embeddings"][0] if results["embeddings"] else []
         
         # Format results
         formatted = []
@@ -142,7 +143,8 @@ class VectorStore:
             formatted.append({
                 "content": docs[i],
                 "metadata": metas[i] if metas else {},
-                "distance": dists[i] if dists else None
+                "distance": dists[i] if dists else None,
+                "embedding": embeddings[i] if embeddings else None
             })
         
         return formatted

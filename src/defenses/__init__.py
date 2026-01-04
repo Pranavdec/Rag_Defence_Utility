@@ -1,3 +1,4 @@
 from .manager import DefenseManager
 from .base import BaseDefense
-from .retrieval_defenses import DifferentialPrivacyDefense
+from .dp_rag import DifferentialPrivacyDefense
+from .trustrag import TrustRAGDefense
