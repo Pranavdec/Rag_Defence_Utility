@@ -1,0 +1,37 @@
+def load_qa_pairs(self, limit: Optional[int] = None) -> List[QAPair]:
+    """Load QA pairs using qrels to match queries to gold docs and extract answers."""
+    self._log(f"Loading QA pairs (limit={limit})...")
+    
+    dataset = ir_datasets.load("natural-questions/dev")
+    
+    # Build qrels first to collect only needed doc_ids
+    qrels = {}
+    all_doc_ids = set()
+    for qrel in dataset.qrels_iter():
+        if qrel.relevance > 0:
+            if qrel.query_id not in qrels:
+                qrels[qrel.query_id] = {
+                    'doc_ids': [],
+                    'short_answers': qrel.short_answers if hasattr(qrel, 'short_answers') else [],
+                    'yes_no_answer': qrel.yes_no_answer if hasattr(qrel, 'yes_no_answer') else ''
+                }
+            qrels[qrel.query_id]['doc_ids'].append(qrel.doc_id)
+            all_doc_ids.add(qrel.doc_id)
+    self._log(f"Loaded {len(qrels)} query-doc mappings")
+    
+    # Fetch only documents referenced in qrels
+    self._log(f"Fetching {len(all_doc_ids)} relevant documents...")
+    docs_store = dataset.docs_store()
+    docs_lookup = docs_store.get_many(all_doc_ids)
+    self._log(f"Loaded {len(docs_lookup)} documents")
+    
+    # Build query lookup (rest of your code remains similar)
+    queries_lookup = {}
+    for query in dataset.queries_iter():
+        queries_lookup[query.query_id] = query.text
+    self._log(f"Loaded {len(queries_lookup)} queries")
+    
+    # Create QA pairs (rest of your code unchanged)
+    qa_pairs = []
+    for query_id, qrel_data in qrels.items():
+        # ... rest of your existing logic

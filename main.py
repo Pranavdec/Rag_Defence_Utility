@@ -206,11 +206,21 @@ def cmd_evaluate(args):
         print(f"✗ File not found: {args.results_file}")
         return
     
-    # Load config
-    config = load_config()
+    # Load the results file to get the config that was used during the run
+    with open(args.results_file) as f:
+        results_data = json.load(f)
+    
+    # Use the config from the results file (config used during inference)
+    # If not present, fall back to current config.yaml
+    if "config" in results_data:
+        config = results_data["config"]
+        print("Using config from results file (inference config)")
+    else:
+        config = load_config()
+        print("Warning: No config found in results file, using current config.yaml")
     
     # Initialize evaluator with judge LLM
-    judge_llm = config["system"].get("judge_llm", config["system"]["llm"]["model_name"])
+    judge_llm = config["system"].get("judge_llm", config["system"]["llm"].get("model_name", "llama3"))
     evaluator = RAGEvaluator(
         llm_model=f"ollama/{judge_llm}",
         embedding_model=config["system"]["embedding_model"]
@@ -226,7 +236,7 @@ def cmd_evaluate(args):
         use_ragas=args.use_ragas,
         use_deepeval=not args.no_deepeval,
         deepeval_max_concurrent=deepeval_max_concurrent,
-        evaluation_config=config
+        evaluation_config=None  # Config is already in results file, no need to pass it again
     )
     
     # Print results

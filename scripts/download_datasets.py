@@ -10,17 +10,18 @@ import sys
 # Add project root to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+# CRITICAL: Set IR_DATASETS_HOME before importing ir_datasets
+# ir_datasets reads this environment variable once on import and caches it
+os.environ['IR_DATASETS_HOME'] = os.path.abspath("data/raw/ir_datasets")
+os.makedirs(os.environ['IR_DATASETS_HOME'], exist_ok=True)
+
 def download_nq():
     """Download NQ via ir_datasets."""
-    print("Downloading NQ (BeIR) via ir_datasets...")
+    print("Downloading NQ (dpr-w100/natural-questions/dev) via ir_datasets...")
     import ir_datasets
     
-    # Set cache directory
-    os.environ['IR_DATASETS_HOME'] = os.path.abspath("data/raw/ir_datasets")
-    os.makedirs(os.environ['IR_DATASETS_HOME'], exist_ok=True)
-    
     # This triggers the download
-    dataset = ir_datasets.load("beir/nq")
+    dataset = ir_datasets.load("dpr-w100/natural-questions/dev")
     
     # Verify we can iterate
     print(f"  - Docs: {dataset.docs_count()}")
