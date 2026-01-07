@@ -1,82 +1,43 @@
-# RAG Defence Utility Configuration
-
 system:
-  embedding_model: "all-MiniLM-L6-v2"  # Fast local embedding model
-  
-  # LLM configuration for answer generation
+  embedding_model: all-MiniLM-L6-v2
   llm:
-    # NEW FORMAT (recommended):
-    provider: "huggingface"  # or "ollama"
-    model_path: "meta-llama/Llama-3.1-8B-Instruct"  # HF model ID
-    device: "auto"  # "cuda", "cpu", or "auto"
+    provider: huggingface
+    model_path: meta-llama/Llama-3.1-8B-Instruct
+    device: auto
     temperature: 0.0
-    
-    # LEGACY FORMAT (auto-migrated to HuggingFace):
-    # model_name: "llama3"  # Auto-migrates to HuggingFace Llama-3.1-8B-Instruct
-    # temperature: 0.0
-    
-    # To explicitly use Ollama instead, uncomment:
-    # provider: "ollama"
-    # model_name: "llama3"
-  
-  judge_llm: "llama3"  # LLM for evaluation metrics (RAGAS/DeepEval) - Ollama only
-
+  judge_llm: llama3
 paths:
-  chroma_db: "data/chroma_db"
-  results: "data/results"
-  cache: "data/raw"
-
-# Data loading parameters
+  chroma_db: data/chroma_db
+  results: data/results
+  cache: data/raw
 data:
-  ingestion_size: 1000   # Number of QA pairs to load (index their gold passages)
-  ingestion_seed: 42    # Random seed for selecting ingestion samples
-  test_size: 1         # Number of those to use for final metrics
-  test_seed: 123        # Random seed for selecting test samples
-
-# Evaluation parameters
+  ingestion_size: 1000
+  ingestion_seed: 42
+  test_size: 1
+  test_seed: 123
 evaluation:
-  deepeval_max_concurrent: 5  # Max concurrent evaluations for DeepEval (reduce to avoid overloading Ollama)
-
-# Retrieval parameters
+  deepeval_max_concurrent: 5
 retrieval:
   top_k: 5
   chunk_size: 512
   chunk_overlap: 50
-
-# Defense parameters
 defenses:
-  - name: "differential_privacy"
-    enabled: false
-    # Mechanism: "dp_pure" (exponential) or "dp_approx" (gaussian)
-    method: "dp_pure"
-    # Privacy budget (lower = more privacy/noise)
-    epsilon: 1.0
-    # Failure probability for approximate DP (should be < 1/dataset_size)
-    delta: 0.01
-    # Multiplier to fetch extra docs before DP filtering (e.g. 3 * top_k)
-    candidate_multiplier: 3
-
-  - name: "trustrag"
-    enabled: true
-    # Cosine similarity threshold: if cluster internal similarity > this, it's considered malicious
-    similarity_threshold: 0.88
-    # ROUGE-L threshold for removing near-duplicate documents within clusters
-    rouge_threshold: 0.25
-    # Multiplier to fetch extra docs before TrustRAG filtering (e.g. 3 * top_k)
-    candidate_multiplier: 3
-
-  - name: "attention_filtering"
-    enabled: true
-    # Hugging Face model ID for attention extraction. ensure access with `hf auth login`
-    model_path: "meta-llama/Llama-3.1-8B-Instruct" 
-    # Number of top tokens to aggregate attention over for each passage
-    top_tokens: 100
-    # Maximum number of passages to filter out (remove highest attention magnitude ones)
-    max_corruptions: 3
-    # Variance threshold; if attention variance is lower than this, stop filtering
-    short_answer_threshold: 50
-    # Device to run the model on: "cuda" or "cpu". Use "cpu" if running OOM on GPU with Ollama.
-    device: "cuda"
-    # Multiplier to fetch extra docs before attention filtering (e.g. 3 * top_k)
-    candidate_multiplier: 3
-
+- name: differential_privacy
+  enabled: false
+  method: dp_pure
+  epsilon: 3.0
+  delta: 0.01
+  candidate_multiplier: 3
+- name: trustrag
+  enabled: false
+  similarity_threshold: 0.88
+  rouge_threshold: 0.25
+  candidate_multiplier: 3
+- name: attention_filtering
+  enabled: false
+  model_path: meta-llama/Llama-3.1-8B-Instruct
+  top_tokens: 100
+  max_corruptions: 3
+  short_answer_threshold: 50
+  device: cuda
+  candidate_multiplier: 3

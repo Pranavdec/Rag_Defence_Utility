@@ -294,8 +294,8 @@ class RAGEvaluator:
         logger.info(f"Using max_concurrent={max_concurrent} for parallel evaluation")
         
         try:
-            # Import AsyncConfig to control parallelization
-            from deepeval.evaluate.configs import AsyncConfig
+            # Import AsyncConfig and ErrorConfig to control parallelization and error handling
+            from deepeval.evaluate.configs import AsyncConfig, ErrorConfig
             
             # Configure async settings to reduce parallelization
             async_config = AsyncConfig(
@@ -304,10 +304,14 @@ class RAGEvaluator:
                 throttle_value=0
             )
             
+            # Configure error handling to ignore errors and continue evaluation
+            error_config = ErrorConfig(ignore_errors=True)
+            
             eval_results = deepeval_evaluate(
                 test_cases, 
                 metrics=metrics,
-                async_config=async_config
+                async_config=async_config,
+                error_config=error_config
             )
             
             final_metrics = {}

@@ -19,6 +19,9 @@ data/chroma_db/
 data/qa_pairs/
 data/results/
 data/metrics/
+data/metrics1/
+data/results1/
+
 
 # Logs
 *.log

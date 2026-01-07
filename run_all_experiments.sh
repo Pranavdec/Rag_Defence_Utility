@@ -11,8 +11,21 @@ if [ "$1" == "--limit" ] && [ -n "$2" ]; then
     echo "Using limit: $2 samples per dataset"
 fi
 
+# Check if Ollama is running, if not start it
+if ! pgrep -x "ollama" > /dev/null; then
+    echo "Ollama is not running. Starting Ollama service..."
+    ollama serve &
+    sleep 3  # Wait for service to start
+    echo "Starting llama3 model..."
+    ollama run llama3 &
+    sleep 2  # Wait for model to load
+    echo "✓ Ollama started successfully"
+else
+    echo "✓ Ollama is already running"
+fi
+
 # Datasets to test
-DATASETS=("pubmedqa" "triviaqa")
+DATASETS=("nq" "pubmedqa" "triviaqa")
 
 # Defense combinations to test
 # Each entry: "NAME:dp_enabled:trustrag_enabled:av_enabled"
