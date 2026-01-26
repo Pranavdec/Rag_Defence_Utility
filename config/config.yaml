@@ -11,7 +11,7 @@ paths:
   results: data/results
   cache: data/raw
 data:
-  ingestion_size: 1000
+  ingestion_size: 700
   ingestion_seed: 42
   test_size: 1
   test_seed: 123
@@ -23,8 +23,8 @@ retrieval:
   chunk_overlap: 50
 defenses:
 - name: differential_privacy
-  enabled: false
-  method: dp_pure
+  enabled: true
+  method: dp_approx
   epsilon: 3.0
   delta: 0.01
   candidate_multiplier: 3
@@ -41,3 +41,13 @@ defenses:
   short_answer_threshold: 50
   device: cuda
   candidate_multiplier: 3
+attack:
+  mba:
+    M: 7  # Number of masks per chunk (optimal: 3-5 for 512-char chunks)
+    gamma: 0.5  # Membership threshold (accuracy > gamma = member)
+    num_members: 50  # Number of member chunks to test (QUICK TEST - use 50+ for real experiments)
+    num_non_members: 50  # Number of non-member chunks to test (QUICK TEST - use 50+ for real experiments)
+    device: auto  # cuda, cpu, or auto
+    proxy_model: gpt2-xl  # gpt2 (small/fast), gpt2-medium, gpt2-large, gpt2-xl (slow)
+    enable_spelling_correction: false  # Disable spelling correction (saves memory)
+    max_document_words: 200  # Truncate documents longer than this (GPT-2 context limit, reduced for chunks)

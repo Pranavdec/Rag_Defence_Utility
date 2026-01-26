@@ -19,8 +19,8 @@ data/chroma_db/
 data/qa_pairs/
 data/results/
 data/metrics/
-data/metrics1/
-data/results1/
+data/metrics*/
+data/results*/
 
 
 # Logs
@@ -30,3 +30,4 @@ data/results1/
 Untitled-1.ipynb
 Untitled-2.ipynb
 /media/crk/datastore_1/Rag_Defence_Utility/1
+test_*.py
