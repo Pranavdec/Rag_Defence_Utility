@@ -57,8 +57,9 @@ class ModularRAG:
     - Result logging for evaluation
     """
     
-    def __init__(self, config_path: str = "config/config.yaml"):
+    def __init__(self, config_path: str = "config/config.yaml", attack_module: Optional[Any] = None):
         self.config = load_config(config_path)
+        self.attack = attack_module
         
         # Extract config values
         self.top_k = self.config["experiment"]["top_k_retrieval"]
@@ -157,6 +158,35 @@ class ModularRAG:
         )
         
         return True
+
+    def ingest_with_attack(self, dataset_name: str, poison_ratio: float = 0.1, sample_size: Optional[int] = None):
+        """
+        Ingest legitimate documents and inject poisoned documents.
+        """
+        # Ingest legitimate documents first
+        self.ingest(dataset_name, sample_size=sample_size)
+        
+        if self.attack and self.vector_store:
+            logger.info("Injecting poisoned documents...")
+            
+            # Estimate dataset size (or use specific count if available)
+            # using sample_size if provided, else use current count
+            current_count = self.vector_store.collection.count()
+            target_poison_count = int(current_count * poison_ratio)
+            
+            if target_poison_count == 0 and poison_ratio > 0:
+                target_poison_count = 5 # Minimum fallback
+            
+            logger.info(f"Generating {target_poison_count} poisoned documents...")
+            poisoned_docs = self.attack.generate_poisoned_corpus(target_size=target_poison_count)
+            
+            # Add to vector store with metadata marking them as poisoned
+            self.vector_store.add_documents(
+                documents=poisoned_docs,
+                metadatas=[{"poisoned": True, "source": "attack_module"} for _ in poisoned_docs],
+                ids=[f"poison_{i}" for i in range(len(poisoned_docs))]
+            )
+            logger.info("Poisoned documents injected.")
     
     def _chunk_text(self, text: str) -> List[str]:
         """Simple text chunking with overlap."""
