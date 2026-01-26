@@ -11,7 +11,7 @@ from dataclasses import asdict
 import yaml
 import logging
 
-from ..data_loaders.base_loader import BaseLoader, Document, TestCase
+from ..data_loaders.base_loader import BaseLoader, QAPair
 from ..data_loaders.nq_loader import NQLoader
 from ..data_loaders.pubmed_loader import PubMedLoader
 from ..data_loaders.trivia_loader import TriviaLoader
@@ -61,16 +61,20 @@ class ModularRAG:
         self.config = load_config(config_path)
         self.attack = attack_module
         
-        # Extract config values
-        self.top_k = self.config["experiment"]["top_k_retrieval"]
-        self.test_sample_size = self.config["experiment"]["test_sample_size"]
-        self.ingestion_limit = self.config["ingestion"].get("limit", 1000)
+        # Extract config values (with fallbacks for different config formats)
+        self.top_k = self.config.get("retrieval", {}).get("top_k", self.config.get("experiment", {}).get("top_k_retrieval", 5))
+        self.test_sample_size = self.config.get("data", {}).get("test_size", self.config.get("experiment", {}).get("test_sample_size", 10))
+        self.sample_size = self.test_sample_size  # Alias for compatibility
+        self.ingestion_limit = self.config.get("data", {}).get("ingestion_size", self.config.get("ingestion", {}).get("limit", 1000))
         
-        self.chunk_size = self.config["ingestion"].get("chunk_size", 512)
-        self.chunk_overlap = self.config["ingestion"].get("chunk_overlap", 50)
+        self.chunk_size = self.config.get("retrieval", {}).get("chunk_size", self.config.get("ingestion", {}).get("chunk_size", 512))
+        self.chunk_overlap = self.config.get("retrieval", {}).get("chunk_overlap", self.config.get("ingestion", {}).get("chunk_overlap", 50))
         
         self.chroma_path = self.config["paths"]["chroma_db"]
         self.results_path = self.config["paths"]["results"]
+        
+        # Get embedding model from config
+        self.embedding_model = self.config.get("system", {}).get("embedding_model", "all-MiniLM-L6-v2")
         
         # Ensure results directory exists
         os.makedirs(self.results_path, exist_ok=True)
@@ -126,29 +130,33 @@ class ModularRAG:
             logger.info(f"Dataset {dataset_name} already ingested. Skipping.")
             return True
 
-        # Load documents
-        documents = loader.load_documents(sample_size=sample_size)
+        # Load QA pairs (gold passages)
+        qa_pairs = loader.load_qa_pairs(limit=sample_size)
         
-        if not documents:
-            logger.warning(f"No documents loaded for {dataset_name}")
+        if not qa_pairs:
+            logger.warning(f"No QA pairs loaded for {dataset_name}")
             return False
         
-        # Chunk documents (simple splitting for now)
+        # Chunk gold passages
         chunked_docs = []
         chunked_metas = []
         chunked_ids = []
         
-        for doc in documents:
-            # Simple chunking by character count
-            content = doc.content
-            chunks = self._chunk_text(content)
-            
-            for i, chunk in enumerate(chunks):
-                chunked_docs.append(chunk)
-                chunked_metas.append({**doc.metadata, "chunk_id": i})
-                chunked_ids.append(f"{doc.doc_id}_chunk_{i}")
+        for qa in qa_pairs:
+            for p_idx, passage in enumerate(qa.gold_passages):
+                chunks = self._chunk_text(passage)
+                
+                for c_idx, chunk in enumerate(chunks):
+                    chunked_docs.append(chunk)
+                    chunked_metas.append({
+                        "pair_id": qa.pair_id,
+                        "question": qa.question[:200],
+                        "passage_idx": p_idx,
+                        "chunk_idx": c_idx
+                    })
+                    chunked_ids.append(f"{qa.pair_id}_p{p_idx}_c{c_idx}")
         
-        logger.info(f"Chunked {len(documents)} documents into {len(chunked_docs)} chunks")
+        logger.info(f"Chunked {len(qa_pairs)} QA pairs into {len(chunked_docs)} chunks")
         
         # Add to vector store
         self.vector_store.add_documents(
@@ -291,21 +299,21 @@ class ModularRAG:
         if self.current_dataset != dataset_name:
             self.ingest(dataset_name, sample_size=sample_size * 10)  # Ingest more docs than test cases
         
-        # Load test set
+        # Load test QA pairs
         loader = get_loader(dataset_name)
-        test_cases = loader.load_test_set(sample_size=sample_size)
+        qa_pairs = loader.load_qa_pairs(limit=sample_size)
         
-        logger.info(f"Running batch on {len(test_cases)} test cases...")
+        logger.info(f"Running batch on {len(qa_pairs)} test cases...")
         
         results = []
         total_latency = 0
         
-        for i, tc in enumerate(test_cases):
-            logger.info(f"Processing {i+1}/{len(test_cases)}: {tc.question[:50]}...")
+        for i, qa in enumerate(qa_pairs):
+            logger.info(f"Processing {i+1}/{len(qa_pairs)}: {qa.question[:50]}...")
             
-            result = self.run_single(tc.question)
-            result["ground_truth"] = tc.ground_truth
-            result["metadata"] = tc.metadata
+            result = self.run_single(qa.question)
+            result["ground_truth"] = qa.answer
+            result["metadata"] = qa.metadata
             
             results.append(result)
             total_latency += result["latency_ms"]

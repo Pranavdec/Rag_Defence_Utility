@@ -48,3 +48,4 @@ class BaseLoader(ABC):
     
     def _log(self, msg: str):
         self.logger.info(f"[{self.name}] {msg}")
+
