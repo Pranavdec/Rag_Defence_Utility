@@ -29,7 +29,14 @@ class DefenseManager:
             config: List of defense configurations, e.g.:
                    [{'name': 'differential_privacy', 'method': 'dp_pure', ...}]
         """
+        self.original_config = config # Store for reset if needed
         self.defenses: List[BaseDefense] = []
+        self.needs_embeddings = False
+        self._init_defenses(config)
+
+    def _init_defenses(self, config: List[Dict[str, Any]]):
+        """Helper to initialize defense list."""
+        self.defenses = []
         self.needs_embeddings = False
         
         if not config:
@@ -55,6 +62,44 @@ class DefenseManager:
                         logger.error(f"Failed to initialize defense {name}: {e}")
             else:
                 logger.warning(f"Unknown defense type: {name}")
+
+    def set_dynamic_config(self, defense_plan: Dict[str, Any]):
+        """
+        Reconfigure defenses at runtime based on Strategist plan.
+        
+        Args:
+           defense_plan: Dict mapping defense_name -> {enabled: bool, ...params}
+        """
+        # We need to construct a new config list based on the plan
+        # The plan is a dict, but we need a list of configs.
+        # We start with the original config so we keep static tokens/secrets if any
+        # But for this system, most config is simple parameters.
+        
+        # Strategy: 
+        # 1. Iterate through known defenses in registry (or just supported ones in ADO)
+        # 2. Build a new config list.
+        
+        new_config_list = []
+        
+        # We assume defense_plan keys match registry keys
+        for name, plan_settings in defense_plan.items():
+            if name not in DEFENSE_REGISTRY:
+                continue
+            
+            # Create a clean config dict for this defense
+            defense_conf = {"name": name}
+            defense_conf.update(plan_settings) # Add enabled, epsilon, etc.
+            
+            # If enabled is false, we might ideally skip adding it 
+            # OR we add it with enabled=False if the class supports that (checked in _init).
+            # _init checks `defense_conf.get("enabled", True)`. 
+            # So passing enabled=False works.
+            
+            new_config_list.append(defense_conf)
+            
+        # Re-initialize
+        logger.info(f"Applying Dynamic Defense Config: {defense_plan}")
+        self._init_defenses(new_config_list)
 
     def apply_pre_retrieval(self, query: str, top_k: int) -> Tuple[str, int]:
         """

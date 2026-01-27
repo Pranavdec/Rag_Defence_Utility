@@ -51,3 +51,9 @@ attack:
     proxy_model: gpt2-xl  # gpt2 (small/fast), gpt2-medium, gpt2-large, gpt2-xl (slow)
     enable_spelling_correction: false  # Disable spelling correction (saves memory)
     max_document_words: 200  # Truncate documents longer than this (GPT-2 context limit, reduced for chunks)
+ado:
+  enabled: true
+  user_id: "test_user_001"
+  sentinel_model: "llama3" # local ollama model
+  strategist_model: "llama3"
+  trust_score_decay: 0.05

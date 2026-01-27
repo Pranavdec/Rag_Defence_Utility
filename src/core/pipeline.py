@@ -18,6 +18,9 @@ from ..data_loaders.trivia_loader import TriviaLoader
 from .retrieval import VectorStore
 from .generation import create_generator
 from ..defenses.manager import DefenseManager
+from .persistence import UserTrustManager
+from .sensing import MetricsCollector
+from .ado import Sentinel, Strategist
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -89,8 +92,27 @@ class ModularRAG:
                 old_conf["name"] = "differential_privacy" # Map old generic defense to specific one
                 defense_config = [old_conf]
         
+        
         self.defense_manager = DefenseManager(defense_config)
         
+        # Initialize ADO Components
+        self.ado_enabled = self.config.get("ado", {}).get("enabled", False)
+        if self.ado_enabled:
+            logger.info("Initializing ADO Components...")
+            self.trust_manager = UserTrustManager()
+            self.metrics_collector = MetricsCollector()
+            
+            ado_config = self.config.get("ado", {})
+            self.sentinel = Sentinel(
+                model_name=ado_config.get("sentinel_model", "llama3"),
+                use_ollama=True # Currently default
+            )
+            self.strategist = Strategist(config=ado_config)
+            
+            # Default test user for batch runs
+            self.default_user_id = ado_config.get("user_id", "test_user_001")
+
+
         # Initialize generator (with potential model sharing from AV defense)
         self.generator = create_generator(self.config, defense_manager=self.defense_manager)
         
@@ -211,7 +233,7 @@ class ModularRAG:
         
         return chunks
     
-    def run_single(self, question: str) -> Dict[str, Any]:
+    def run_single(self, question: str, user_id: Optional[str] = None, session_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Run RAG on a single question.
         
@@ -221,11 +243,66 @@ class ModularRAG:
         if self.vector_store is None:
             raise RuntimeError("No dataset ingested. Call ingest() first.")
         
+        # Determine User ID
+        if user_id is None:
+            user_id = getattr(self, "default_user_id", "anonymous")
+
+        # --- ADO STAGE 1: SENSE & REASON ---
+        ado_metadata = {}
+        if self.ado_enabled:
+            # 1. Get Trust Context
+            user_ctx = self.trust_manager.get_user_context(user_id)
+            trust_score = user_ctx.global_trust_score
+            
+            # 2. Sense (Pre-Retrieval)
+            # TODO: We need a history tracker. For now, empty.
+            pre_metrics = self.metrics_collector.calculate_pre_retrieval(question, history=[])
+            
+            # 3. Sentinel Analysis
+            risk_profile = self.sentinel.analyze(
+                query=question,
+                trust_score=trust_score,
+                metrics=pre_metrics,
+                history_window=[] # Pass empty history for now
+            )
+            
+            logger.info(f"ADO Risk Assessment: {risk_profile.overall_threat_level} | Trust: {trust_score:.2f}")
+
+            # 4. Strategist Configuration
+            defense_plan = self.strategist.generate_defense_plan(risk_profile)
+            
+            # Apply Defense Plan (Dynamic Configuration)
+            self.defense_manager.set_dynamic_config(defense_plan)
+            
+            ado_metadata = {
+                "risk_profile": asdict(risk_profile),
+                "trust_score": trust_score,
+                "defense_plan": defense_plan
+            }
+            
+            # Update Trust Score (Persistence)
+            self.trust_manager.update_trust_score(
+                user_id, 
+                risk_profile.new_global_score_delta, 
+                reason=risk_profile.reasoning_trace
+            )
+
+        
         # Defense Pre-Retrieval
         query_text, fetch_k = self.defense_manager.apply_pre_retrieval(question, self.top_k)
         
         # Retrieve
         retrieved = self.vector_store.query(query_text, top_k=fetch_k)
+
+        # --- ADO STAGE 2: SENSE (Retrieval) ---
+        if self.ado_enabled:
+             # Calculate dispersion/drop-off
+             scores = [r.get("score", 0.0) for r in retrieved]
+             embeddings = [r.get("embedding", []) for r in retrieved] # Assuming vector_store returns these? Likely not by default.
+             # If embeddings missing, we skip M_DIS
+             ret_metrics = self.metrics_collector.calculate_retrieval(scores, embeddings)
+             ado_metadata["metrics"] = ret_metrics
+
         
         # Defense Post-Retrieval
         retrieved = self.defense_manager.apply_post_retrieval(retrieved, question)
@@ -233,30 +310,11 @@ class ModularRAG:
         contexts = [r["content"] for r in retrieved]
         
         # Defense Pre-Generation
-        # Default system prompt is None in generator, but we can pass one if defense wants to inject
-        system_prompt = None 
-        # But wait, generator.generate takes system_prompt.
-        # We need to construct user_prompt too? 
-        # Actually generator.generate constructs user prompt from context+question.
-        # Defense might want to modify the QUESTION that goes into prompt? or the CONTEXTS?
-        
-        # My BaseDefense.pre_generation signature is (system_prompt, user_prompt, contexts)
-        # But generator builds the prompt internally. 
-        # I should probably update generator to accept inputs more flexibly, OR
-        # I can just pass modified contexts and question?
-        # The user wanted "post-gen defense".
-        # Let's see what base.py says: pre_generation(system_prompt, user_prompt, contexts)
-        # Here I have `question` and `contexts`.
-        # I can pass `question` as `user_prompt` effectively for now.
-        
         sys_p, user_p, mod_contexts = self.defense_manager.apply_pre_generation(
             system_prompt="", # Default empty
             user_prompt=question,
             contexts=contexts
         )
-        
-        # Generator expects question. If user_p changed, we treat it as new question.
-        # If sys_p changed, we pass it.
         
         # Generate
         result = self.generator.generate(
@@ -273,7 +331,8 @@ class ModularRAG:
             "answer": result["answer"],
             "contexts": contexts,
             "latency_ms": result["latency_ms"],
-            "model": result["model"]
+            "model": result["model"],
+            "ado_metadata": ado_metadata
         }
     
     def run_batch(
