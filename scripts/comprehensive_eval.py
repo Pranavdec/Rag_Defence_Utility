@@ -1131,13 +1131,15 @@ Examples:
     # Run based on mode
     if args.mode == "quick":
         print("Running QUICK evaluation...")
-        evaluator.run_mixed_series(
-            dataset=args.dataset,
-            num_benign=10,
-            num_mba=5,
-            num_poison=5,
-            defense_combo=args.defenses
-        )
+        for ds in datasets:
+            for combo in defense_combos:
+                evaluator.run_mixed_series(
+                    dataset=ds,
+                    num_benign=10,
+                    num_mba=5,
+                    num_poison=5,
+                    defense_combo=combo
+                )
     
     elif args.mode == "full":
         print("Running FULL evaluation...")
@@ -1175,14 +1177,15 @@ Examples:
     
     elif args.mode == "mixed":
         print("Running MIXED series evaluation...")
-        for combo in defense_combos:
-            evaluator.run_mixed_series(
-                dataset=args.dataset,
-                num_benign=args.num_benign,
-                num_mba=args.num_mba,
-                num_poison=args.num_poison,
-                defense_combo=combo
-            )
+        for ds in datasets:
+            for combo in defense_combos:
+                evaluator.run_mixed_series(
+                    dataset=ds,
+                    num_benign=args.num_benign,
+                    num_mba=args.num_mba,
+                    num_poison=args.num_poison,
+                    defense_combo=combo
+                )
 
 
 if __name__ == "__main__":
