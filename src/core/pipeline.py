@@ -116,6 +116,14 @@ class ModularRAG:
         # Initialize generator (with potential model sharing from AV defense)
         self.generator = create_generator(self.config, defense_manager=self.defense_manager)
         
+        # If using HuggingFace generator with ADO, share the model with AV defense
+        # This prevents OOM when ADO dynamically enables AV defense
+        if hasattr(self.generator, 'llm') and self.generator.llm is not None:
+            from ..defenses.av_defense import AttentionFilteringDefense
+            AttentionFilteringDefense._shared_model = self.generator.llm
+            AttentionFilteringDefense._shared_model_path = getattr(self.generator, 'model_path', None)
+            logger.info("Pre-registered generator model for potential AV defense sharing")
+        
         # Vector store will be initialized per dataset
         self.vector_store: Optional[VectorStore] = None
         self.current_dataset: Optional[str] = None
@@ -282,8 +290,8 @@ class ModularRAG:
             }
             logger.info(f"Metrics - Current Pre: {current_pre_metrics}, Previous Post: {prev_post_metrics}")
             
-            # 4. Sentinel Analysis (uses current pre + previous post metrics)
-            risk_profile = self.sentinel.analyze(
+            # 4. SENTINEL PHASE 1: Pre-retrieval analysis (query + history)
+            risk_profile = self.sentinel.analyze_pre_retrieval(
                 query=question,
                 trust_score=trust_score,        # From previous interactions
                 metrics=combined_metrics,       # Current pre + previous post
@@ -291,21 +299,22 @@ class ModularRAG:
                 trust_history=trust_history     # Trust trend over time
             )
             
-            logger.info(f"ADO Risk Assessment: {risk_profile.overall_threat_level} | Trust: {trust_score:.2f} | Trend: {'DECLINING' if len(trust_history) >= 2 and trust_history[-1].get('delta', 0) < 0 else 'STABLE'}")
+            logger.info(f"ADO Pre-Retrieval: {risk_profile.overall_threat_level} | Trust: {trust_score:.2f} | Trend: {'DECLINING' if len(trust_history) >= 2 and trust_history[-1].get('delta', 0) < 0 else 'STABLE'}")
 
-            # 4. Strategist Configuration
+            # 5. STRATEGIST: Initial defense plan (pre-retrieval defenses like DP)
             defense_plan = self.strategist.generate_defense_plan(risk_profile)
             
-            # Apply Defense Plan (Dynamic Configuration)
+            # Apply Pre-Retrieval Defense Plan (DP enabled here if needed)
             self.defense_manager.set_dynamic_config(defense_plan)
             
             ado_metadata = {
                 "risk_profile": asdict(risk_profile),
                 "trust_score": trust_score,
+                "initial_defense_plan": defense_plan.copy(),
                 "defense_plan": defense_plan
             }
             
-            # Update Trust Score (Persistence) - do this BEFORE inference
+            # Update Trust Score (Persistence)
             self.trust_manager.update_trust_score(
                 user_id, 
                 risk_profile.new_global_score_delta, 
@@ -322,20 +331,47 @@ class ModularRAG:
         # Retrieve
         retrieved = self.vector_store.query(query_text, top_k=fetch_k, include_embeddings=need_embeddings)
 
-        # --- ADO STAGE 2: Calculate POST-retrieval metrics ---
-        post_retrieval_metrics = {}
+        # --- ADO STAGE 2: SENTINEL PHASE 2 - Post-retrieval analysis ---
         if self.ado_enabled:
-             # Calculate dispersion/drop-off from retrieval results
-             # VectorStore returns 'distance' (cosine distance), convert to similarity score
-             distances = [r.get("distance", 0.0) for r in retrieved if r.get("distance") is not None]
-             scores = [1.0 - d for d in distances]  # Convert distance to similarity score
-             embeddings = [r.get("embedding") for r in retrieved if r.get("embedding") is not None]
-             post_retrieval_metrics = self.metrics_collector.calculate_retrieval(scores, embeddings)
-             logger.info(f"POST-retrieval metrics: {post_retrieval_metrics}")
-             ado_metadata["retrieval_metrics"] = post_retrieval_metrics
+            # Calculate dispersion/drop-off from retrieval results
+            distances = [r.get("distance", 0.0) for r in retrieved if r.get("distance") is not None]
+            scores = [1.0 - d for d in distances]  # Convert distance to similarity score
+            embeddings = [r.get("embedding") for r in retrieved if r.get("embedding") is not None]
+            post_retrieval_metrics = self.metrics_collector.calculate_retrieval(scores, embeddings)
+            
+            logger.info(f"ADO Post-Retrieval metrics: m_dis={post_retrieval_metrics.get('m_dis', 0):.4f}, m_drp={post_retrieval_metrics.get('m_drp', 0):.3f}")
+            ado_metadata["retrieval_metrics"] = post_retrieval_metrics
+            
+            # SENTINEL PHASE 2: Analyze retrieval patterns for anomalies
+            # This detects poisoning (high dispersion) and probing (high drop-off)
+            post_analysis = self.sentinel.analyze_post_retrieval(
+                risk_profile=risk_profile,
+                post_metrics=post_retrieval_metrics,
+                trust_score=trust_score
+            )
+            ado_metadata["post_retrieval_analysis"] = asdict(post_analysis)
+            
+            # STRATEGIST PHASE 2: Generate post-retrieval defense plan (can enable TrustRAG/AV)
+            updated_plan = self.strategist.generate_defense_plan(post_analysis, stage="post_retrieval")
+            
+            # Check if post-retrieval defenses were activated
+            initial_plan = ado_metadata.get("initial_defense_plan", {})
+            trustrag_activated = updated_plan.get("trustrag", {}).get("enabled") and not initial_plan.get("trustrag", {}).get("enabled")
+            av_activated = updated_plan.get("attention_filtering", {}).get("enabled") and not initial_plan.get("attention_filtering", {}).get("enabled")
+            
+            if trustrag_activated or av_activated:
+                logger.warning(f"ADO POST-RETRIEVAL DEFENSE ACTIVATED: TrustRAG={trustrag_activated}, AV={av_activated} | Reason: {post_analysis.reasoning_trace}")
+                self.defense_manager.set_dynamic_config(updated_plan)
+                ado_metadata["defense_plan"] = updated_plan
+                ado_metadata["post_retrieval_defense_activated"] = True
+                ado_metadata["activated_defenses"] = {
+                    "trustrag": trustrag_activated,
+                    "av": av_activated,
+                    "reason": post_analysis.reasoning_trace
+                }
 
         
-        # Defense Post-Retrieval
+        # Defense Post-Retrieval (TrustRAG/AV now enabled if anomalies detected)
         retrieved = self.defense_manager.apply_post_retrieval(retrieved, question)
         
         contexts = [r["content"] for r in retrieved]

@@ -25,6 +25,10 @@ class AttentionFilteringDefense(BaseDefense):
     Identifies "benign" passages that actually contribute to the answer.
     """
     
+    # Class-level shared model (singleton pattern to avoid loading multiple instances)
+    _shared_model = None
+    _shared_model_path = None
+    
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         self.config = config
@@ -36,6 +40,22 @@ class AttentionFilteringDefense(BaseDefense):
         self.short_answer_threshold = int(config.get("short_answer_threshold", 50))
         self.candidate_multiplier = config.get("candidate_multiplier", 3)
         self.target_top_k = 5  # Will be updated in pre_retrieval
+        
+        # Check if shared model was provided
+        shared_model = config.get("shared_model", None)
+        
+        if shared_model is not None:
+            # Use the provided shared model
+            self.llm = shared_model
+            logger.info(f"[AV Defense] Using shared model instance")
+            return
+        
+        # Check class-level singleton
+        if (AttentionFilteringDefense._shared_model is not None and 
+            AttentionFilteringDefense._shared_model_path == self.model_path):
+            self.llm = AttentionFilteringDefense._shared_model
+            logger.info(f"[AV Defense] Reusing singleton model: {self.model_path}")
+            return
         
         # Model config wrapper
         model_config = {
@@ -58,6 +78,9 @@ class AttentionFilteringDefense(BaseDefense):
         
         try:
             self.llm = create_model(model_config, device=device)
+            # Store as singleton
+            AttentionFilteringDefense._shared_model = self.llm
+            AttentionFilteringDefense._shared_model_path = self.model_path
         except Exception as e:
             logger.error(f"[AV Defense] Failed to initialize model: {e}")
             raise e

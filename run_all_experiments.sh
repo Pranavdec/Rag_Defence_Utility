@@ -28,16 +28,20 @@ fi
 DATASETS=("nq" "pubmedqa" "triviaqa")
 
 # Defense combinations to test
-# Each entry: "NAME:dp_enabled:trustrag_enabled:av_enabled"
+# Each entry: "NAME:dp_enabled:trustrag_enabled:av_enabled:ado_enabled"
 DEFENSE_COMBOS=(
-    "no_defense:False:False:False"
-    "dp_only:True:False:False"
-    "trustrag_only:False:True:False"
-    "av_only:False:False:True"
-    "dp_trustrag:True:True:False"
-    "dp_av:True:False:True"
-    "trustrag_av:False:True:True"
-    "all_defenses:True:True:True"
+    "no_defense:False:False:False:False"
+    "dp_only:True:False:False:False"
+    "trustrag_only:False:True:False:False"
+    "av_only:False:False:True:False"
+    "dp_trustrag:True:True:False:False"
+    "dp_av:True:False:True:False"
+    "trustrag_av:False:True:True:False"
+    "all_defenses:True:True:True:False"
+    "ado_only:False:False:False:True"
+    "ado_dp:True:False:False:True"
+    "ado_trustrag:False:True:False:True"
+    "ado_all:True:True:True:True"
 )
 
 # Colors for output
@@ -78,6 +82,7 @@ update_defense_config() {
     local dp_enabled=$1
     local trustrag_enabled=$2
     local av_enabled=$3
+    local ado_enabled=$4
     
     # Use Python to update YAML properly
     python3 << EOF
@@ -95,10 +100,15 @@ for defense in config.get('defenses', []):
     elif defense['name'] == 'attention_filtering':
         defense['enabled'] = $av_enabled
 
+# Update ADO setting
+if 'ado' not in config:
+    config['ado'] = {}
+config['ado']['enabled'] = $ado_enabled
+
 with open('$CONFIG_FILE', 'w') as f:
     yaml.dump(config, f, default_flow_style=False, sort_keys=False)
 
-print("Updated config: DP=$dp_enabled, TrustRAG=$trustrag_enabled, AV=$av_enabled")
+print("Updated config: DP=$dp_enabled, TrustRAG=$trustrag_enabled, AV=$av_enabled, ADO=$ado_enabled")
 EOF
 }
 
@@ -113,17 +123,17 @@ echo -e "${BLUE}========================================${NC}"
 echo ""
 
 for combo in "${DEFENSE_COMBOS[@]}"; do
-    IFS=':' read -r combo_name dp_enabled trustrag_enabled av_enabled <<< "$combo"
+    IFS=':' read -r combo_name dp_enabled trustrag_enabled av_enabled ado_enabled <<< "$combo"
     
     echo ""
     echo -e "${YELLOW}========================================${NC}"
     echo -e "${YELLOW}Defense Configuration: $combo_name${NC}"
     echo -e "${YELLOW}========================================${NC}"
-    echo "  DP: $dp_enabled | TrustRAG: $trustrag_enabled | AV: $av_enabled"
+    echo "  DP: $dp_enabled | TrustRAG: $trustrag_enabled | AV: $av_enabled | ADO: $ado_enabled"
     echo ""
     
     # Update config for this defense combination
-    update_defense_config "$dp_enabled" "$trustrag_enabled" "$av_enabled"
+    update_defense_config "$dp_enabled" "$trustrag_enabled" "$av_enabled" "$ado_enabled"
     
     for dataset in "${DATASETS[@]}"; do
         current_run=$((current_run + 1))
