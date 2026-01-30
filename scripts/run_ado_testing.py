@@ -23,7 +23,7 @@ def test_ado_simulation():
     rag = ModularRAG(config_path="config/config.yaml")
     
     # Pre-ingest dummy data if needed
-    if not rag.vector_store.is_populated():
+    if rag.vector_store is None or not rag.vector_store.is_populated():
         logger.info("Ingesting dummy data...")
         rag.ingest("nq", sample_size=10) # Minimal ingest
 
@@ -57,23 +57,29 @@ def test_ado_simulation():
     trust2 = ado_meta2.get("trust_score", 0.0)
     risk2 = ado_meta2.get("risk_profile", {}).get("overall_threat_level", "UNKNOWN")
     defense_plan2 = ado_meta2.get("defense_plan", {})
+    trust_delta2 = ado_meta2.get("risk_profile", {}).get("new_global_score_delta", 0.0)
     
-    logger.info(f"Q2 Result: Risk={risk2}, Trust={trust2}")
+    logger.info(f"Q2 Result: Risk={risk2}, Trust={trust2}, Delta={trust_delta2}")
     logger.info(f"Defense Plan: {defense_plan2}")
     
     # Assertions
-    # Note: These depend on LLM acting correctly. 
-    # If Trust Score dropped, success.
-    if trust2 < trust1:
-         logger.info("SUCCESS: Trust score decreased after attack.")
+    # Note: The trust_score shown is the "before" value, delta shows the change
+    if trust_delta2 < 0:
+         logger.info(f"SUCCESS: Trust score will decrease by {trust_delta2} after attack.")
     else:
-         logger.warning("WARNING: Trust score did not decrease. (Check Sentinel Prompt/LLM)")
+         logger.warning("WARNING: Trust score delta is not negative. (Check Sentinel Prompt/LLM)")
 
     # Check if defenses enabled
     if defense_plan2.get("differential_privacy", {}).get("enabled", False):
         logger.info("SUCCESS: Differential Privacy enabled.")
     else:
         logger.warning(f"WARNING: DP not enabled. Risk level was {risk2}")
+    
+    # Check if attention filtering enabled
+    if defense_plan2.get("attention_filtering", {}).get("enabled", False):
+        logger.info("SUCCESS: Attention Filtering enabled.")
+    else:
+        logger.warning(f"WARNING: Attention Filtering not enabled. Jailbreak threat level was {ado_meta2.get('risk_profile', {}).get('specific_threats', {}).get('jailbreak', 0)}")
 
 if __name__ == "__main__":
     test_ado_simulation()

@@ -250,23 +250,48 @@ class ModularRAG:
         # --- ADO STAGE 1: SENSE & REASON ---
         ado_metadata = {}
         if self.ado_enabled:
-            # 1. Get Trust Context
+            # 1. Get Trust Context from previous interactions
             user_ctx = self.trust_manager.get_user_context(user_id)
             trust_score = user_ctx.global_trust_score
+            trust_history = getattr(user_ctx, 'trust_history', [])
+            query_history = getattr(user_ctx, 'query_history', [])
+            metrics_history = getattr(user_ctx, 'metrics_history', [])
             
-            # 2. Sense (Pre-Retrieval)
-            # TODO: We need a history tracker. For now, empty.
-            pre_metrics = self.metrics_collector.calculate_pre_retrieval(question, history=[])
-            
-            # 3. Sentinel Analysis
-            risk_profile = self.sentinel.analyze(
-                query=question,
-                trust_score=trust_score,
-                metrics=pre_metrics,
-                history_window=[] # Pass empty history for now
+            # 2. Calculate CURRENT PRE-retrieval metrics (from query text)
+            # These can be calculated immediately without inference:
+            # - M_LEX: Lexical overlap with previous queries
+            # - M_CMP: Query complexity (special chars)
+            # - M_INT: Intent velocity (time between queries)
+            current_pre_metrics = self.metrics_collector.calculate_pre_retrieval(
+                question, 
+                history=query_history[-5:] if query_history else []
             )
             
-            logger.info(f"ADO Risk Assessment: {risk_profile.overall_threat_level} | Trust: {trust_score:.2f}")
+            # 3. Get PREVIOUS POST-retrieval metrics (from last query's retrieval)
+            # These can only be calculated after retrieval completes:
+            # - M_DIS: Embedding dispersion
+            # - M_DRP: Score drop-off
+            prev_post_metrics = {}
+            if metrics_history and len(metrics_history) > 0:
+                prev_post_metrics = metrics_history[-1].get('post_retrieval', {})
+            
+            # Combine both metric sets
+            combined_metrics = {
+                **current_pre_metrics,      # Current query analysis
+                **prev_post_metrics         # Previous retrieval patterns
+            }
+            logger.info(f"Metrics - Current Pre: {current_pre_metrics}, Previous Post: {prev_post_metrics}")
+            
+            # 4. Sentinel Analysis (uses current pre + previous post metrics)
+            risk_profile = self.sentinel.analyze(
+                query=question,
+                trust_score=trust_score,        # From previous interactions
+                metrics=combined_metrics,       # Current pre + previous post
+                history_window=query_history[-5:] if query_history else [],
+                trust_history=trust_history     # Trust trend over time
+            )
+            
+            logger.info(f"ADO Risk Assessment: {risk_profile.overall_threat_level} | Trust: {trust_score:.2f} | Trend: {'DECLINING' if len(trust_history) >= 2 and trust_history[-1].get('delta', 0) < 0 else 'STABLE'}")
 
             # 4. Strategist Configuration
             defense_plan = self.strategist.generate_defense_plan(risk_profile)
@@ -280,7 +305,7 @@ class ModularRAG:
                 "defense_plan": defense_plan
             }
             
-            # Update Trust Score (Persistence)
+            # Update Trust Score (Persistence) - do this BEFORE inference
             self.trust_manager.update_trust_score(
                 user_id, 
                 risk_profile.new_global_score_delta, 
@@ -291,17 +316,23 @@ class ModularRAG:
         # Defense Pre-Retrieval
         query_text, fetch_k = self.defense_manager.apply_pre_retrieval(question, self.top_k)
         
+        # Determine if embeddings are needed (for TrustRAG defense or ADO metrics)
+        need_embeddings = self.defense_manager.needs_embeddings or self.ado_enabled
+        
         # Retrieve
-        retrieved = self.vector_store.query(query_text, top_k=fetch_k)
+        retrieved = self.vector_store.query(query_text, top_k=fetch_k, include_embeddings=need_embeddings)
 
-        # --- ADO STAGE 2: SENSE (Retrieval) ---
+        # --- ADO STAGE 2: Calculate POST-retrieval metrics ---
+        post_retrieval_metrics = {}
         if self.ado_enabled:
-             # Calculate dispersion/drop-off
-             scores = [r.get("score", 0.0) for r in retrieved]
-             embeddings = [r.get("embedding", []) for r in retrieved] # Assuming vector_store returns these? Likely not by default.
-             # If embeddings missing, we skip M_DIS
-             ret_metrics = self.metrics_collector.calculate_retrieval(scores, embeddings)
-             ado_metadata["metrics"] = ret_metrics
+             # Calculate dispersion/drop-off from retrieval results
+             # VectorStore returns 'distance' (cosine distance), convert to similarity score
+             distances = [r.get("distance", 0.0) for r in retrieved if r.get("distance") is not None]
+             scores = [1.0 - d for d in distances]  # Convert distance to similarity score
+             embeddings = [r.get("embedding") for r in retrieved if r.get("embedding") is not None]
+             post_retrieval_metrics = self.metrics_collector.calculate_retrieval(scores, embeddings)
+             logger.info(f"POST-retrieval metrics: {post_retrieval_metrics}")
+             ado_metadata["retrieval_metrics"] = post_retrieval_metrics
 
         
         # Defense Post-Retrieval
@@ -325,6 +356,18 @@ class ModularRAG:
         
         # Defense Post-Generation
         result["answer"] = self.defense_manager.apply_post_generation(result["answer"])
+        
+        # --- ADO STAGE 3: Store metrics for next round ---
+        if self.ado_enabled:
+            # Store both pre and post retrieval metrics
+            # Pre-metrics are already calculated (current_pre_metrics)
+            # Post-metrics were calculated after retrieval (post_retrieval_metrics)
+            combined_metrics_for_storage = {
+                'pre_retrieval': current_pre_metrics,
+                'post_retrieval': post_retrieval_metrics
+            }
+            self.trust_manager.update_query_history(user_id, question, combined_metrics_for_storage)
+            logger.debug(f"Stored query with pre+post metrics for user {user_id}")
         
         return {
             "question": question,

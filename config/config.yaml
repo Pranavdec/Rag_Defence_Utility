@@ -23,7 +23,7 @@ retrieval:
   chunk_overlap: 50
 defenses:
 - name: differential_privacy
-  enabled: true
+  enabled: false
   method: dp_approx
   epsilon: 3.0
   delta: 0.01

@@ -75,12 +75,18 @@ class MetricsCollector:
         # Variance of distances among retrieved chunks.
         # High variance = Conflicting contexts (Poisoning risk) or hallucination prone
         if top_docs_embeddings and len(top_docs_embeddings) > 1:
-             # Calculate pairwise distances or variance of embeddings
-             # For speed, we'll just check variance of the scores themselves as a proxy if embeddings aren't handy,
-             # but since we pass embeddings, let's try a simple centroid variance.
-             
-             # Simplify: Just use variance of scores for now as a proxy for density
-             metrics['m_dis'] = float(np.var(top_docs_scores))
+            try:
+                # Use actual embedding variance when available
+                emb_array = np.array(top_docs_embeddings)
+                # Calculate variance across embedding dimensions, then mean
+                # High value = embeddings are spread out (diverse/conflicting contexts)
+                metrics['m_dis'] = float(np.mean(np.var(emb_array, axis=0)))
+            except Exception:
+                # Fallback to score variance
+                metrics['m_dis'] = float(np.var(top_docs_scores)) if top_docs_scores else 0.0
+        elif top_docs_scores and len(top_docs_scores) > 1:
+            # Fallback: use score variance as proxy
+            metrics['m_dis'] = float(np.var(top_docs_scores))
         else:
             metrics['m_dis'] = 0.0
             
