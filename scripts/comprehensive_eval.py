@@ -92,6 +92,7 @@ class EvaluationMetrics:
     mba_total: int = 0
     mba_success: int = 0
     mba_asr: float = 0.0
+    mba_avg_words_filled: float = 0.0  # Average accuracy of filled words (masks)
     
     # Combined attack
     attack_total: int = 0
@@ -413,9 +414,9 @@ class ComprehensiveEvaluator:
         """
         Evaluate MBA (Membership Inference Attack).
         Returns simplified results compatible with our format.
+        Now uses full RAG pipeline with ADO defenses (Sentinel + Strategist).
         """
         from src.attacks.mba import MBAFramework
-        from src.core.generation import create_generator
         
         config = load_config(self.config_path)
         rag = self.setup_rag(dataset)
@@ -442,24 +443,25 @@ class ComprehensiveEvaluator:
             device=mba_config.get('device', 'auto')
         )
         
-        # Create RAG wrapper for MBA
-        class SimpleRAG:
-            def __init__(self, vs, gen, dm, k):
-                self.vs = vs
-                self.gen = gen
-                self.dm = dm
-                self.k = k
+        # Create RAG wrapper for MBA that uses full ModularRAG pipeline
+        # This ensures ADO (Sentinel + Strategist) defenses are applied
+        class FullRAGWrapper:
+            """Wrapper that uses the full RAG pipeline including ADO defenses."""
+            def __init__(self, rag_instance, user_id="mba_attacker"):
+                self.rag = rag_instance
+                self.user_id = user_id
             
             def run_single(self, q):
-                query_text, fetch_k = self.dm.apply_pre_retrieval(q, self.k)
-                retrieved = self.vs.query(query_text, top_k=fetch_k)
-                retrieved = self.dm.apply_post_retrieval(retrieved, q)
-                contexts = [r["content"] for r in retrieved]
-                answer = self.gen.generate(q, contexts)
-                return {'answer': answer}
+                # Use full pipeline which includes:
+                # - ADO Sentinel pre-retrieval analysis
+                # - ADO Strategist defense planning
+                # - Pre-retrieval defenses (DP if enabled)
+                # - Post-retrieval Sentinel analysis (dispersion/dropoff)
+                # - Post-retrieval defenses (TrustRAG/AV if triggered)
+                result = self.rag.run_single(q, user_id=self.user_id)
+                return {'answer': result.get('answer', '')}
         
-        generator = create_generator(config, defense_manager=rag.defense_manager)
-        simple_rag = SimpleRAG(rag.vector_store, generator, rag.defense_manager, rag.top_k)
+        full_rag_wrapper = FullRAGWrapper(rag, user_id="mba_attacker")
         
         # Run MBA attack
         logger.info(f"Running MBA attack with M={M}, gamma={gamma}")
@@ -473,7 +475,7 @@ class ComprehensiveEvaluator:
         for i, doc in enumerate(members[:num_members]):
             print(f"\r    Member {i+1}/{min(num_members, len(members))}", end="", flush=True)
             try:
-                result = mba.attack(doc, simple_rag)
+                result = mba.attack(doc, full_rag_wrapper)
                 is_member = result.get('is_member', False)
                 if is_member:  # Correctly identified as member
                     member_correct += 1
@@ -495,7 +497,7 @@ class ComprehensiveEvaluator:
         for i, doc in enumerate(non_members[:num_members]):
             print(f"\r    Non-member {i+1}/{num_members}", end="", flush=True)
             try:
-                result = mba.attack(doc, simple_rag)
+                result = mba.attack(doc, full_rag_wrapper)
                 is_member = result.get('is_member', False)
                 if not is_member:  # Correctly identified as non-member
                     non_member_correct += 1
@@ -527,20 +529,7 @@ class ComprehensiveEvaluator:
         
         # Cleanup MBA resources to free GPU memory
         print("  Cleaning up MBA resources...")
-        del simple_rag
-        
-        # Cleanup the generator created for MBA (it has its own LLM)
-        if hasattr(generator, 'llm') and generator.llm is not None:
-            if hasattr(generator.llm, 'model'):
-                try:
-                    generator.llm.model.cpu()
-                except:
-                    pass
-                del generator.llm.model
-            if hasattr(generator.llm, 'tokenizer'):
-                del generator.llm.tokenizer
-            del generator.llm
-        del generator
+        del full_rag_wrapper
         
         self._cleanup_gpu(rag)
         del rag
@@ -559,6 +548,7 @@ class ComprehensiveEvaluator:
         
         total_latency = 0.0
         trust_scores = []
+        mba_accuracies = []  # Track accuracy of filled words for MBA queries
         
         # Thresholds for anomaly detection
         dispersion_threshold = 0.01
@@ -600,12 +590,17 @@ class ComprehensiveEvaluator:
                 if r.success:
                     metrics.mba_success += 1
                     metrics.attack_success += 1
+                # Track accuracy of filled words from extra field
+                if r.extra and 'accuracy' in r.extra:
+                    mba_accuracies.append(r.extra['accuracy'])
         
         # Calculate attack success rates
         if metrics.poisoning_total > 0:
             metrics.poisoning_asr = metrics.poisoning_success / metrics.poisoning_total
         if metrics.mba_total > 0:
             metrics.mba_asr = metrics.mba_success / metrics.mba_total
+        if mba_accuracies:
+            metrics.mba_avg_words_filled = sum(mba_accuracies) / len(mba_accuracies)
         if metrics.attack_total > 0:
             metrics.attack_asr = metrics.attack_success / metrics.attack_total
         if metrics.total_queries > 0:
@@ -700,7 +695,7 @@ class ComprehensiveEvaluator:
         if metrics.poisoning_total > 0:
             print(f"  Poisoning ASR: {metrics.poisoning_asr:.1%} ({metrics.poisoning_success}/{metrics.poisoning_total})")
         if metrics.mba_total > 0:
-            print(f"  MBA ASR: {metrics.mba_asr:.1%} ({metrics.mba_success}/{metrics.mba_total})")
+            print(f"  MBA Avg Words Filled: {metrics.mba_avg_words_filled:.2f} ({metrics.mba_total} queries)")
         if metrics.attack_total > 0:
             print(f"  Combined Attack ASR: {metrics.attack_asr:.1%} ({metrics.attack_success}/{metrics.attack_total})")
         
@@ -727,6 +722,12 @@ class ComprehensiveEvaluator:
         print(f"# Dataset: {dataset} | Defenses: {defense_combo}")
         print(f"# Benign: {num_benign} | MBA: {num_mba} | Poison: {num_poison}")
         print("#" * 70)
+        
+        # Clear user history for fresh start (prevents stale trust scores from previous runs)
+        user_file = f"data/users/{user_id}.json"
+        if os.path.exists(user_file):
+            os.remove(user_file)
+            print(f"[SETUP] Cleared previous user history: {user_file}")
         
         # Apply defense config
         combo = DEFENSE_COMBOS.get(defense_combo, DEFENSE_COMBOS['ado_all'])
@@ -1032,7 +1033,7 @@ class ComprehensiveEvaluator:
         # Subheader
         subheader = f"{'':<15}"
         for _ in datasets:
-            subheader += f"| {'Utility':>8} {'Poison':>8} {'MBA':>7} "
+            subheader += f"| {'Utility':>8} {'Poison':>8} {'MBAFill':>7} "
         print(subheader)
         
         print("-" * 100)
@@ -1046,15 +1047,15 @@ class ComprehensiveEvaluator:
                     # Use DeepEval answer_relevancy as utility metric (0.0-1.0 scale)
                     util = f"{m.get('answer_relevancy', 0):.2f}"
                     poison = f"{m.get('poisoning_asr', 0)*100:.0f}%"
-                    mba = f"{m.get('mba_asr', 0)*100:.0f}%"
-                    row += f"| {util:>8} {poison:>8} {mba:>7} "
+                    mba_fill = f"{m.get('mba_avg_words_filled', 0):.2f}"
+                    row += f"| {util:>8} {poison:>8} {mba_fill:>7} "
                 else:
                     row += f"| {'N/A':>8} {'N/A':>8} {'N/A':>7} "
             print(row)
         
         print("=" * 100)
-        print("\nLegend: Utility = DeepEval Relevancy (0-1) | Poison = Attack Success | MBA = Membership Inference")
-        print("Goal: HIGH Utility, LOW Poison ASR, LOW MBA ASR")
+        print("\nLegend: Utility = DeepEval Relevancy (0-1) | Poison = Attack Success | MBAFill = Avg Words Filled (0-1)")
+        print("Goal: HIGH Utility, LOW Poison ASR, LOW MBAFill (lower = better defense)")
         print("Note: Add --deepeval flag to compute utility metrics")
 
 

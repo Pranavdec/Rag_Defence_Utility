@@ -301,6 +301,11 @@ class ModularRAG:
             
             logger.info(f"ADO Pre-Retrieval: {risk_profile.overall_threat_level} | Trust: {trust_score:.2f} | Trend: {'DECLINING' if len(trust_history) >= 2 and trust_history[-1].get('delta', 0) < 0 else 'STABLE'}")
 
+            # Inject trust score and trend into risk_profile for Strategist to use
+            trust_trend = 'DECLINING' if len(trust_history) >= 2 and trust_history[-1].get('delta', 0) < 0 else 'STABLE'
+            risk_profile.specific_threats['_trust_score'] = trust_score
+            risk_profile.specific_threats['_trust_trend'] = trust_trend
+
             # 5. STRATEGIST: Initial defense plan (pre-retrieval defenses like DP)
             defense_plan = self.strategist.generate_defense_plan(risk_profile)
             
@@ -350,6 +355,10 @@ class ModularRAG:
                 trust_score=trust_score
             )
             ado_metadata["post_retrieval_analysis"] = asdict(post_analysis)
+            
+            # Inject trust score and trend into post_analysis for Strategist
+            post_analysis.specific_threats['_trust_score'] = trust_score
+            post_analysis.specific_threats['_trust_trend'] = trust_trend
             
             # STRATEGIST PHASE 2: Generate post-retrieval defense plan (can enable TrustRAG/AV)
             updated_plan = self.strategist.generate_defense_plan(post_analysis, stage="post_retrieval")

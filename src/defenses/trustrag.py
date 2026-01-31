@@ -17,8 +17,24 @@ class TrustRAGDefense(BaseDefense):
     """
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        self.similarity_threshold = config.get("similarity_threshold", 0.88)
-        self.rouge_threshold = config.get("rouge_threshold", 0.25)
+        # Ensure thresholds are floats (LLM might pass strings)
+        sim_thresh = config.get("similarity_threshold", 0.88)
+        rouge_thresh = config.get("rouge_threshold", 0.25)
+        
+        # Convert to float if string (e.g., "0.88-0.95" -> 0.88)
+        if isinstance(sim_thresh, str):
+            try:
+                sim_thresh = float(sim_thresh.split('-')[0].strip())
+            except:
+                sim_thresh = 0.88
+        if isinstance(rouge_thresh, str):
+            try:
+                rouge_thresh = float(rouge_thresh.split('-')[0].strip())
+            except:
+                rouge_thresh = 0.25
+        
+        self.similarity_threshold = float(sim_thresh)
+        self.rouge_threshold = float(rouge_thresh)
         self.candidate_multiplier = config.get("candidate_multiplier", 3)
         self.target_top_k = 5  # Will be updated in pre_retrieval
 

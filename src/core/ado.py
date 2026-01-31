@@ -320,8 +320,9 @@ class Strategist:
     
     Takes Risk Profile from Sentinel + Defense Registry → outputs Defense Plan.
     
-    This is LLM-based - the LLM reasons about which defenses to enable
-    based on the specific threats identified.
+    Supports two modes:
+    - 'deterministic': Fast, pure rule-based decisions (no LLM call)
+    - 'llm': LLM-based reasoning with deterministic safety overrides
     
     Two-stage operation:
     - Pre-retrieval: Can enable DP (retrieval layer defense)
@@ -332,28 +333,42 @@ class Strategist:
         self.config = config
         self.model_name = model_name
         self.use_ollama = use_ollama
+        # Mode: 'deterministic' (default, fast) or 'llm' (slower but more nuanced)
+        self.mode = config.get("strategist_mode", "deterministic")
+        logger.info(f"Strategist initialized in '{self.mode}' mode")
 
     def generate_defense_plan(self, risk_profile: RiskProfile, stage: str = "pre_retrieval",
                                metrics: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
         """
-        LLM-based defense planning with deterministic safety overrides.
+        Generate defense plan based on mode:
+        - 'deterministic': Pure rule-based, no LLM call (fast)
+        - 'llm': LLM-based with deterministic safety overrides
         
         Args:
             risk_profile: From Sentinel analysis
             stage: "pre_retrieval" or "post_retrieval" - determines which defenses can be enabled
             metrics: Raw metrics from MetricsCollector for deterministic overrides
         """
-        prompt = self._construct_prompt(risk_profile, stage)
-        logger.info(f"Strategist planning defenses for {stage}, threat={risk_profile.overall_threat_level}")
+        logger.info(f"Strategist ({self.mode}) planning defenses for {stage}, threat={risk_profile.overall_threat_level}")
         
+        # DETERMINISTIC MODE: Skip LLM, use pure rule-based logic
+        if self.mode == "deterministic":
+            plan = self._deterministic_plan(risk_profile, stage, metrics)
+            logger.info(f"Strategist deterministic plan: DP={plan['differential_privacy']['enabled']}, "
+                       f"epsilon={plan['differential_privacy']['epsilon']}, "
+                       f"TrustRAG={plan['trustrag']['enabled']}, AV={plan['attention_filtering']['enabled']}")
+            return plan
+        
+        # LLM MODE: Call LLM with deterministic overrides as safety net
         try:
+            prompt = self._construct_prompt(risk_profile, stage)
             if self.use_ollama:
                 response_json = self._call_ollama(prompt)
             else:
                 response_json = "{}"
             
             data = json.loads(response_json)
-            logger.info(f"Strategist response: {data}")
+            logger.info(f"Strategist LLM response: {data}")
             defense_plan = data.get("defense_plan", {})
             
             # Build structured plan from LLM response
@@ -364,8 +379,8 @@ class Strategist:
             return plan
             
         except Exception as e:
-            logger.error(f"Strategist failed: {e}. Using fallback.")
-            return self._fallback_plan(risk_profile, stage)
+            logger.error(f"Strategist LLM failed: {e}. Using deterministic fallback.")
+            return self._deterministic_plan(risk_profile, stage, metrics)
 
     def _construct_prompt(self, risk_profile: RiskProfile, stage: str) -> str:
         # Determine available defenses based on stage
@@ -400,6 +415,9 @@ Your job is to decide which defenses to enable based on the Risk Profile from Se
 Overall Threat Level: {risk_profile.overall_threat_level}
 Reasoning: {risk_profile.reasoning_trace}
 
+User Trust Score: {risk_profile.specific_threats.get('_trust_score', 0.5):.2f} (0=untrusted, 1=fully trusted)
+Trust Trend: {risk_profile.specific_threats.get('_trust_trend', 'STABLE')}
+
 Specific Threat Scores:
 - Membership Inference: {risk_profile.specific_threats.get('membership_inference', 0):.2f}
 - Jailbreak: {risk_profile.specific_threats.get('jailbreak', 0):.2f}
@@ -412,9 +430,15 @@ Specific Threat Scores:
 {DEFENSE_REGISTRY}
 
 === DECISION GUIDELINES ===
-- LOW threat + high trust → Minimize defenses for speed/utility
-- ELEVATED threat → Enable relevant defenses with moderate settings
-- CRITICAL threat → Enable all relevant defenses with strict settings
+- LOW threat + HIGH trust (>0.7) → Minimize defenses for speed/utility
+- ELEVATED threat OR LOW trust (<0.3) → Enable defenses with moderate settings
+- CRITICAL threat OR VERY LOW trust (<0.2) + DECLINING → Strict settings
+
+EPSILON GUIDELINES (for differential_privacy):
+- Trust > 0.7 → epsilon 6.0-10.0 (less noise, better utility)
+- Trust 0.3-0.7 → epsilon 3.0-5.0 (moderate protection)
+- Trust < 0.3 → epsilon 1.0-2.0 (strong protection)
+- Trust < 0.2 + DECLINING → epsilon 0.5-1.0 (maximum protection)
 
 IMPORTANT: Match defenses to specific threats:
 - membership_inference → differential_privacy
@@ -427,7 +451,7 @@ IMPORTANT: Match defenses to specific threats:
   "defense_plan": {{
     "differential_privacy": {{
       "enabled": true | false,
-      "epsilon": 1.0-10.0
+      "epsilon": 0.5-10.0
     }},
     "trustrag": {{
       "enabled": true | false,
@@ -437,7 +461,7 @@ IMPORTANT: Match defenses to specific threats:
       "enabled": true | false,
       "max_corruptions": 3
     }},
-    "reasoning": "Explain why you chose these settings based on threat scores"
+    "reasoning": "Explain why you chose these settings based on threat scores AND trust score"
   }}
 }}"""
 
@@ -454,11 +478,18 @@ IMPORTANT: Match defenses to specific threats:
         metrics = metrics or {}
         
         # M_LEX > 0.7 OR membership_inference > 0.5 => Force DP
-        if metrics.get("m_lex", 0) > 0.7 or threats.get("membership_inference", 0) > 0.5:
+        mia_threat = threats.get("membership_inference", 0)
+        if metrics.get("m_lex", 0) > 0.7 or mia_threat > 0.5:
             if not plan["differential_privacy"]["enabled"]:
                 logger.warning("OVERRIDE: Forcing DP on due to high M_LEX or membership_inference")
                 plan["differential_privacy"]["enabled"] = True
-                plan["differential_privacy"]["epsilon"] = 2.0  # Moderate protection
+            # Also enforce epsilon based on MIA threat level
+            if mia_threat > 0.7:
+                plan["differential_privacy"]["epsilon"] = min(plan["differential_privacy"]["epsilon"], 1.0)
+                logger.warning(f"OVERRIDE: High MIA threat={mia_threat:.2f} - epsilon capped to 1.0")
+            elif mia_threat > 0.5:
+                plan["differential_privacy"]["epsilon"] = min(plan["differential_privacy"]["epsilon"], 2.0)
+                logger.warning(f"OVERRIDE: Elevated MIA threat={mia_threat:.2f} - epsilon capped to 2.0")
         
         # M_DIS > 0.005 OR data_poisoning > 0.5 => Force TrustRAG
         if metrics.get("m_dis", 0) > 0.005 or threats.get("data_poisoning", 0) > 0.5:
@@ -480,6 +511,33 @@ IMPORTANT: Match defenses to specific threats:
                 plan["differential_privacy"]["enabled"] = True
                 plan["differential_privacy"]["epsilon"] = 1.0  # Stronger protection for bots
         
+        # LOW TRUST OVERRIDE: Adjust epsilon based on trust score
+        # This is the key fix - epsilon should DECREASE (more privacy) when trust is LOW
+        trust_score = threats.get('_trust_score', 0.5)
+        trust_trend = threats.get('_trust_trend', 'STABLE')
+        
+        if plan["differential_privacy"]["enabled"]:
+            current_epsilon = plan["differential_privacy"]["epsilon"]
+            
+            # Very low trust + declining = maximum protection
+            if trust_score < 0.2 and trust_trend == 'DECLINING':
+                new_epsilon = min(current_epsilon, 0.5)
+                if new_epsilon < current_epsilon:
+                    logger.warning(f"OVERRIDE: Trust={trust_score:.2f} DECLINING - forcing epsilon {current_epsilon} -> {new_epsilon}")
+                    plan["differential_privacy"]["epsilon"] = new_epsilon
+            # Low trust = strong protection
+            elif trust_score < 0.3:
+                new_epsilon = min(current_epsilon, 1.5)
+                if new_epsilon < current_epsilon:
+                    logger.warning(f"OVERRIDE: Low trust={trust_score:.2f} - forcing epsilon {current_epsilon} -> {new_epsilon}")
+                    plan["differential_privacy"]["epsilon"] = new_epsilon
+            # Medium-low trust = moderate protection
+            elif trust_score < 0.5:
+                new_epsilon = min(current_epsilon, 3.0)
+                if new_epsilon < current_epsilon:
+                    logger.warning(f"OVERRIDE: Medium trust={trust_score:.2f} - capping epsilon {current_epsilon} -> {new_epsilon}")
+                    plan["differential_privacy"]["epsilon"] = new_epsilon
+        
         return plan
 
     def _build_plan_from_response(self, defense_plan: Dict, stage: str) -> Dict[str, Any]:
@@ -488,17 +546,31 @@ IMPORTANT: Match defenses to specific threats:
         tr = defense_plan.get("trustrag", {})
         av = defense_plan.get("attention_filtering", {})
         
+        # Helper to safely convert to float (LLM might return strings like "0.88-0.95")
+        def safe_float(val, default):
+            if val is None:
+                return default
+            if isinstance(val, (int, float)):
+                return float(val)
+            if isinstance(val, str):
+                # Handle range strings like "0.88-0.95" by taking first value
+                try:
+                    return float(val.split('-')[0].strip())
+                except:
+                    return default
+            return default
+        
         plan = {
             "differential_privacy": {
                 "enabled": dp.get("enabled", False),
-                "epsilon": dp.get("epsilon", 4.0),
+                "epsilon": safe_float(dp.get("epsilon"), 4.0),
                 "delta": 0.01,
                 "method": "dp_approx",
                 "candidate_multiplier": 3
             },
             "trustrag": {
                 "enabled": tr.get("enabled", False),
-                "similarity_threshold": tr.get("similarity_threshold", 0.88),
+                "similarity_threshold": safe_float(tr.get("similarity_threshold"), 0.88),
                 "rouge_threshold": 0.25,
                 "candidate_multiplier": 3
             },
@@ -506,7 +578,7 @@ IMPORTANT: Match defenses to specific threats:
                 "enabled": av.get("enabled", False),
                 "model_path": self.config.get("av_model_path", "meta-llama/Llama-3.1-8B-Instruct"),
                 "top_tokens": 100,
-                "max_corruptions": av.get("max_corruptions", 3),
+                "max_corruptions": int(safe_float(av.get("max_corruptions"), 3)),
                 "short_answer_threshold": 50,
                 "candidate_multiplier": 3
             }
@@ -549,6 +621,115 @@ IMPORTANT: Match defenses to specific threats:
         }
         
         logger.warning(f"Strategist using FALLBACK plan for {level} threat")
+        return plan
+
+    def _deterministic_plan(self, risk_profile: RiskProfile, stage: str, 
+                            metrics: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
+        """
+        Pure deterministic defense planning - no LLM call.
+        Uses threat scores from Sentinel + metrics to decide defenses.
+        
+        IMPORTANT: Respects stage boundaries:
+        - pre_retrieval: Can only enable DP
+        - post_retrieval: Can only enable TrustRAG, AV
+        """
+        threats = risk_profile.specific_threats
+        level = risk_profile.overall_threat_level
+        metrics = metrics or {}
+        
+        # Extract trust info
+        trust_score = threats.get('_trust_score', 0.5)
+        trust_trend = threats.get('_trust_trend', 'STABLE')
+        mia_threat = threats.get('membership_inference', 0)
+        poison_threat = threats.get('data_poisoning', 0)
+        jailbreak_threat = threats.get('jailbreak', 0)
+        leakage_threat = threats.get('content_leakage', 0)
+        
+        # --- DIFFERENTIAL PRIVACY DECISION (PRE-RETRIEVAL ONLY) ---
+        dp_enabled = False
+        epsilon = 4.0  # Default moderate
+        
+        if stage == "pre_retrieval":
+            # Enable DP based on threats
+            if mia_threat > 0.4 or level == "CRITICAL":
+                dp_enabled = True
+            if metrics.get("m_lex", 0) > 0.7:  # High lexical overlap = probing
+                dp_enabled = True
+            if metrics.get("m_int", 0) > 0.7:  # High intent velocity = bot
+                dp_enabled = True
+                epsilon = 1.0  # Bots get max protection
+            
+            # Set epsilon based on threat level and trust
+            if dp_enabled:
+                if level == "CRITICAL" or mia_threat > 0.7:
+                    epsilon = 1.0
+                elif level == "ELEVATED" or mia_threat > 0.5:
+                    epsilon = 2.0
+                elif mia_threat > 0.4:
+                    epsilon = 3.0
+                
+                # Trust-based adjustments (lower trust = lower epsilon = more privacy)
+                if trust_score < 0.2 and trust_trend == 'DECLINING':
+                    epsilon = min(epsilon, 0.5)
+                elif trust_score < 0.3:
+                    epsilon = min(epsilon, 1.5)
+                elif trust_score < 0.5:
+                    epsilon = min(epsilon, 3.0)
+        
+        # --- TRUSTRAG DECISION (POST-RETRIEVAL ONLY) ---
+        trustrag_enabled = False
+        similarity_threshold = 0.88
+        
+        if stage == "post_retrieval":
+            if poison_threat > 0.4 or level == "CRITICAL":
+                trustrag_enabled = True
+            if metrics.get("m_dis", 0) > 0.005:  # High dispersion = poisoning
+                trustrag_enabled = True
+            
+            if trustrag_enabled:
+                if level == "CRITICAL" or poison_threat > 0.7:
+                    similarity_threshold = 0.95
+                elif poison_threat > 0.5:
+                    similarity_threshold = 0.92
+                else:
+                    similarity_threshold = 0.90
+        
+        # --- ATTENTION FILTERING DECISION (POST-RETRIEVAL ONLY) ---
+        av_enabled = False
+        
+        if stage == "post_retrieval":
+            if jailbreak_threat > 0.4 or leakage_threat > 0.4:
+                av_enabled = True
+            if metrics.get("m_cmp", 0) > 0.6:  # High complexity = obfuscation
+                av_enabled = True
+            if level == "CRITICAL":
+                av_enabled = True
+        
+        # Build final plan
+        plan = {
+            "differential_privacy": {
+                "enabled": dp_enabled,
+                "epsilon": epsilon,
+                "delta": 0.01,
+                "method": "dp_approx",
+                "candidate_multiplier": 3
+            },
+            "trustrag": {
+                "enabled": trustrag_enabled,
+                "similarity_threshold": similarity_threshold,
+                "rouge_threshold": 0.25,
+                "candidate_multiplier": 3
+            },
+            "attention_filtering": {
+                "enabled": av_enabled,
+                "model_path": self.config.get("av_model_path", "meta-llama/Llama-3.1-8B-Instruct"),
+                "top_tokens": 100,
+                "max_corruptions": 3,
+                "short_answer_threshold": 50,
+                "candidate_multiplier": 3
+            }
+        }
+        
         return plan
 
     def _call_ollama(self, prompt: str) -> str:

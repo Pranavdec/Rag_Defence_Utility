@@ -56,4 +56,5 @@ ado:
   user_id: test_user_001
   sentinel_model: llama3
   strategist_model: llama3
+  strategist_mode: deterministic
   trust_score_decay: 0.05
