@@ -22,7 +22,7 @@ data/metrics/
 data/metrics*/
 data/results*/
 data/users*/
-
+old_logs/
 
 # Logs
 *.log

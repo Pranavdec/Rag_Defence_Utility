@@ -3,32 +3,36 @@ system:
   llm:
     provider: huggingface 
     model_path: meta-llama/Llama-3.1-8B-Instruct
-    device: auto
+    device: cuda
     temperature: 0.0
-    model_name: llama3 # only when provider is ollama
+    model_name: llama3
   judge_llm: llama3
 
 paths:
   chroma_db: data/chroma_db
   results: data/results
   cache: data/raw
+
 data:
-  dataset: nq # nq, pubmedqa, triviaqa
+  dataset: nq
   ingestion_size: 700
   ingestion_seed: 42
   test_size: 5
   test_seed: 123
+
 evaluation:
-  skip_deepeval: true
+  skip_deepeval: true  # Skip for faster iteration
   deepeval_max_concurrent: 5
+
 retrieval:
-  top_k: 5
+  top_k: 10  # Increased to give poison more chance
   chunk_size: 512
   chunk_overlap: 50
+
 defenses:
 - name: differential_privacy
   enabled: false
-  method: dp_approx # or dp_pure
+  method: dp_approx
   epsilon: 3.0
   delta: 0.01
   candidate_multiplier: 3
@@ -45,25 +49,28 @@ defenses:
   threshold: 50
   device: cuda
   candidate_multiplier: 3
+
 attack:
   mba:
     enabled: true
-    M: 7
-    gamma: 0.5
-    num_members: 10 # no.of memebrs data used for attack
-    num_non_members: 10 # no.of non memebrs data used for attack
-    device: auto
+    M: 5  # Fewer masks = easier task
+    gamma: 0.3  # Lower threshold = easier to classify as member
+    num_members: 5
+    num_non_members: 5
+    device: cuda
     proxy_model: gpt2-xl
     enable_spelling_correction: false
-    max_document_words: 200
+    max_document_words: 500  # More context for better predictions
     seed: 42
+  
   poisoned_rag:
     enabled: true
-    poisoning_rate: 5
-    num_targets: 10
+    poisoning_rate: 50  # Much higher - flood the retrieval
+    num_targets: 5  # Fewer targets, more docs per target
     seed: 42
     target_start_index: 0
     diversity_level: true
+
 ado:
   enabled: false
   user_id: test_user_001

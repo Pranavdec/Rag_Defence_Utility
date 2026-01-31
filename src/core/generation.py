@@ -6,6 +6,7 @@ Provides a simple interface for text generation with RAG context.
 from typing import List, Optional, Dict, Any
 import logging
 import torch
+import time
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -120,7 +121,8 @@ Answer:"""
             padding=True
         ).to(self.llm.model.device)
         
-        # Generate
+        # Generate with latency tracking
+        start_time = time.time()
         with torch.no_grad():
             outputs = self.llm.model.generate(
                 inputs['input_ids'],
@@ -131,6 +133,7 @@ Answer:"""
                 temperature=self.temperature if self.temperature > 0 else None,
                 use_cache=True,
             )
+        latency_ms = (time.time() - start_time) * 1000
         
         # Decode only the new tokens
         generated_ids = outputs[:, inputs['input_ids'].shape[1]:]
@@ -139,7 +142,8 @@ Answer:"""
         
         return {
             "answer": answer.strip(),
-            "model": self.model_path
+            "model": self.model_path,
+            "latency_ms": latency_ms
         }
     
     def generate_simple(self, prompt: str) -> str:
@@ -202,6 +206,7 @@ Question: {question}
 
 Answer:"""
         
+        start_time = time.time()
         response = ollama.chat(
             model=self.model_name,
             messages=[
@@ -210,12 +215,14 @@ Answer:"""
             ],
             options={"temperature": self.temperature}
         )
+        latency_ms = (time.time() - start_time) * 1000
         
         answer = response["message"]["content"]
         
         return {
             "answer": answer,
-            "model": self.model_name
+            "model": self.model_name,
+            "latency_ms": latency_ms
         }
     
     def generate_simple(self, prompt: str) -> str:

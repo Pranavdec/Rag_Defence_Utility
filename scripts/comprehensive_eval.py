@@ -413,6 +413,10 @@ class ConfigDrivenEvaluator:
         print()
         return results
     
+    def _should_run_deepeval(self) -> bool:
+        """Check if DeepEval should be run."""
+        return not self.config.get('evaluation', {}).get('skip_deepeval', False)
+    
     def _run_poisoning_attack(self) -> List[QueryResult]:
         """Run poisoning attack and return results."""
         results = []
@@ -433,9 +437,22 @@ class ConfigDrivenEvaluator:
             
             res = self.run_query(pair['question'])
             answer = res.get("answer", "")
+            contexts = res.get("contexts", [])
             target = pair['target_answer']
             
+            # Check if poison was retrieved
+            poison_retrieved = any('poison' in str(ctx).lower() for ctx in contexts)
+            
             success = target.lower() in answer.lower() if target else False
+            
+            # Debug logging
+            if not success:
+                logger.info(f"\n[POISON FAILURE] Q: {pair['question'][:100]}")
+                logger.info(f"  Target: '{target}'")
+                logger.info(f"  Answer: '{answer[:200]}'")
+                logger.info(f"  Poison retrieved: {poison_retrieved}")
+                if contexts:
+                    logger.info(f"  First context snippet: {contexts[0][:150] if contexts[0] else 'empty'}...")
             
             results.append(QueryResult(
                 query=pair['question'],
@@ -467,6 +484,12 @@ class ConfigDrivenEvaluator:
             res = self.run_query(payload['query'], user_id="mba_attacker")
             answer = res.get("answer", "")
             responses.append(answer)
+            
+            # Debug first few
+            if i < 3:
+                logger.info(f"\n[MBA SAMPLE {i+1}] Is Member: {payload['is_member']}")
+                logger.info(f"  Ground Truth: {payload['ground_truth']}")
+                logger.info(f"  Response: {answer[:300]}")
             
             results.append(QueryResult(
                 query=payload['query'][:100] + "...",
@@ -582,29 +605,32 @@ class ConfigDrivenEvaluator:
                 "contexts": r.extra.get("contexts", [])
             })
         
-        logger.info(f"Running DeepEval on {len(eval_data)} benign queries...")
-        
-        try:
-            max_concurrent = self.config.get("evaluation", {}).get("deepeval_max_concurrent", 5)
-            deepeval_results = self.deepeval_evaluator.evaluate_with_deepeval(
-                eval_data, max_concurrent=max_concurrent
-            )
+        if self._should_run_deepeval():
+            logger.info(f"Running DeepEval on {len(eval_data)} benign queries...")
             
-            metrics.answer_relevancy = deepeval_results.get("deepeval_answer_relevancy", 
-                                        deepeval_results.get("deepeval_answerrelevancymetric", 0.0))
-            metrics.faithfulness = deepeval_results.get("deepeval_faithfulness",
-                                    deepeval_results.get("deepeval_faithfulnessmetric", 0.0))
-            metrics.contextual_relevancy = deepeval_results.get("deepeval_contextual_relevancy",
-                                            deepeval_results.get("deepeval_contextualrelevancymetric", 0.0))
-            metrics.contextual_recall = deepeval_results.get("deepeval_contextual_recall",
-                                         deepeval_results.get("deepeval_contextualrecallmetric", 0.0))
-            
-            logger.info(f"DeepEval: AR={metrics.answer_relevancy:.3f}, F={metrics.faithfulness:.3f}, "
-                       f"CR={metrics.contextual_relevancy:.3f}, CRec={metrics.contextual_recall:.3f}")
-        except Exception as e:
-            logger.error(f"DeepEval evaluation failed: {e}")
-            import traceback
-            traceback.print_exc()
+            try:
+                max_concurrent = self.config.get("evaluation", {}).get("deepeval_max_concurrent", 5)
+                deepeval_results = self.deepeval_evaluator.evaluate_with_deepeval(
+                    eval_data, max_concurrent=max_concurrent
+                )
+                
+                metrics.answer_relevancy = deepeval_results.get("deepeval_answer_relevancy", 
+                                            deepeval_results.get("deepeval_answerrelevancymetric", 0.0))
+                metrics.faithfulness = deepeval_results.get("deepeval_faithfulness",
+                                        deepeval_results.get("deepeval_faithfulnessmetric", 0.0))
+                metrics.contextual_relevancy = deepeval_results.get("deepeval_contextual_relevancy",
+                                                deepeval_results.get("deepeval_contextualrelevancymetric", 0.0))
+                metrics.contextual_recall = deepeval_results.get("deepeval_contextual_recall",
+                                             deepeval_results.get("deepeval_contextualrecallmetric", 0.0))
+                
+                logger.info(f"DeepEval: AR={metrics.answer_relevancy:.3f}, F={metrics.faithfulness:.3f}, "
+                           f"CR={metrics.contextual_relevancy:.3f}, CRec={metrics.contextual_recall:.3f}")
+            except Exception as e:
+                logger.error(f"DeepEval evaluation failed: {e}")
+                import traceback
+                traceback.print_exc()
+        else:
+            logger.info("DeepEval evaluation SKIPPED (skip_deepeval=true)")
         
         return metrics
     

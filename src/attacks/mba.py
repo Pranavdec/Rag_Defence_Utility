@@ -9,7 +9,7 @@ import re
 import random
 import torch
 import numpy as np
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Any
 from transformers import GPT2LMHeadModel, GPT2Tokenizer, AutoModelForSeq2SeqLM, AutoTokenizer
 import logging
 
@@ -346,6 +346,44 @@ class MBAFramework:
             },
             'details': results_details
         }
+    
+    def generate_masks(self, document: str) -> Tuple[str, Dict[str, str]]:
+        """
+        Generate strategic masks for a document using the full MBA pipeline.
+        
+        Args:
+            document: Original document text
+            
+        Returns:
+            Tuple of (masked_document, answer_key)
+        """
+        # Truncate if too long
+        words_in_doc = document.split()
+        if len(words_in_doc) > self.max_document_words:
+            document = ' '.join(words_in_doc[:self.max_document_words])
+        
+        # Extract candidate words
+        candidate_words = self._extract_candidate_words(document)
+        
+        if not candidate_words:
+            return document, {}
+        
+        # Calculate rank scores for candidates
+        rank_scores = self._calculate_rank_scores(document, candidate_words)
+        
+        if not rank_scores:
+            return document, {}
+        
+        # Select strategic masks
+        masked_indices = self._select_strategic_masks(document, rank_scores)
+        
+        if not masked_indices:
+            return document, {}
+        
+        # Integrate masks into document
+        masked_doc, answer_key = self._integrate_masks(document, masked_indices)
+        
+        return masked_doc, answer_key
     
     def _extract_candidate_words(self, document: str) -> List[str]:
         """Extract candidate words from document (excluding stop words and punctuation)."""
