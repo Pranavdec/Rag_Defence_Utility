@@ -1,16 +1,20 @@
 system:
   embedding_model: all-MiniLM-L6-v2
   llm:
-    provider: huggingface
+    provider: huggingface 
     model_path: meta-llama/Llama-3.1-8B-Instruct
     device: auto
     temperature: 0.0
+    model_name: llama3 # only when provider is ollama
   judge_llm: llama3
+
+
 paths:
   chroma_db: data/chroma_db
   results: data/results
   cache: data/raw
 data:
+  dataset: nq # nq, pubmedqa, triviaqa
   ingestion_size: 700
   ingestion_seed: 42
   test_size: 1
@@ -24,7 +28,7 @@ retrieval:
 defenses:
 - name: differential_privacy
   enabled: false
-  method: dp_approx
+  method: dp_approx # or dp_pure
   epsilon: 3.0
   delta: 0.01
   candidate_multiplier: 3
@@ -38,19 +42,28 @@ defenses:
   model_path: meta-llama/Llama-3.1-8B-Instruct
   top_tokens: 100
   max_corruptions: 3
-  short_answer_threshold: 50
+  threshold: 50
   device: cuda
   candidate_multiplier: 3
 attack:
   mba:
+    enabled: false
     M: 7
     gamma: 0.5
-    num_members: 50
-    num_non_members: 50
+    num_members: 50 # no.of memebrs data used for attack
+    num_non_members: 50 # no.of non memebrs data used for attack
     device: auto
     proxy_model: gpt2-xl
     enable_spelling_correction: false
     max_document_words: 200
+    seed: 42
+  poisoned_rag:
+    enabled: false
+    poisoning_rate: 5
+    num_targets: 10
+    seed: 42
+    target_start_index: 0
+    diversity_level: true
 ado:
   enabled: true
   user_id: test_user_001

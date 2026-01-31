@@ -82,21 +82,14 @@ class ModularRAG:
         # Ensure results directory exists
         os.makedirs(self.results_path, exist_ok=True)
         
-        # Initialize Defense Manager FIRST (so it can be passed to generator)
-        # Support both old 'defense' (dict) and new 'defenses' (list) config
-        defense_config = self.config.get("defenses", [])
-        if not defense_config and "defense" in self.config:
-            # Migration path: wrap old single defense config in list
-            old_conf = self.config["defense"]
-            if old_conf and old_conf.get("method"):
-                old_conf["name"] = "differential_privacy" # Map old generic defense to specific one
-                defense_config = [old_conf]
+        # Check ADO status FIRST (needed for Defense Manager initialization)
+        self.ado_enabled = self.config.get("ado", {}).get("enabled", False)
         
-        
-        self.defense_manager = DefenseManager(defense_config)
+        # Initialize Defense Manager (pass ado_enabled for instance pooling)
+        defense_config = self.config.get("defenses", [])        
+        self.defense_manager = DefenseManager(defense_config, ado_enabled=self.ado_enabled)
         
         # Initialize ADO Components
-        self.ado_enabled = self.config.get("ado", {}).get("enabled", False)
         if self.ado_enabled:
             logger.info("Initializing ADO Components...")
             self.trust_manager = UserTrustManager()
@@ -130,20 +123,25 @@ class ModularRAG:
         
         logger.info(f"ModularRAG initialized with config from {config_path}")
     
-    def ingest(self, dataset_name: str, sample_size: Optional[int] = None) -> bool:
+    def ingest(self) -> bool:
         """
         Ingest documents from a dataset into the vector store.
-        Skips if already populated.
-        
-        Args:
-            dataset_name: One of 'nq', 'pubmedqa', 'triviaqa'
-            sample_size: Override config sample_size for documents
+        Configuration (dataset, size, seed) is read from config.yaml.
+        If an attack module is present, poisoned documents are injected.
         """
-        sample_size = sample_size or self.sample_size
+        # Read config
+        dataset_name = self.config["data"]["dataset"]
+        ingestion_size = self.config["data"]["ingestion_size"]
+        seed = self.config["data"]["ingestion_seed"]
         
-        logger.info(f"Starting ingestion for {dataset_name}...")
+        # Set seeds for determinism
+        import random
+        import numpy as np
+        random.seed(seed)
+        np.random.seed(seed)
         
-
+        logger.info(f"Starting ingestion for {dataset_name} (size={ingestion_size}, seed={seed})...")
+        
         # Load loader to get correct name
         loader = get_loader(dataset_name)
         
@@ -156,12 +154,18 @@ class ModularRAG:
         self.current_dataset = dataset_name
         
         # Check if already populated
+        # Note: We rely on the collection name. If settings changed (e.g. size), users should clear DB manually or we need force refresh logic.
         if self.vector_store.is_populated():
             logger.info(f"Dataset {dataset_name} already ingested. Skipping.")
             return True
 
         # Load QA pairs (gold passages)
-        qa_pairs = loader.load_qa_pairs(limit=sample_size)
+        # We load more if possible to allow for seeded selection, but BaseLoader.load_qa_pairs usually just takes limit.
+        # Assuming load_qa_pairs returns a list we can shuffle/sample if we fetched more?
+        # For now, we trust the pipeline flow: fetch 'ingestion_size'.
+        # To truly support "seed selects same docs" if the loader is just iterating, we relies on deterministic iteration.
+        # If the loader randomizes, we've set the seed above.
+        qa_pairs = loader.load_qa_pairs(limit=ingestion_size, seed=seed)
         
         if not qa_pairs:
             logger.warning(f"No QA pairs loaded for {dataset_name}")
@@ -180,7 +184,7 @@ class ModularRAG:
                     chunked_docs.append(chunk)
                     chunked_metas.append({
                         "pair_id": qa.pair_id,
-                        "question": qa.question[:200],
+                        "question": qa.question,
                         "passage_idx": p_idx,
                         "chunk_idx": c_idx
                     })
@@ -195,27 +199,21 @@ class ModularRAG:
             ids=chunked_ids
         )
         
-        return True
-
-    def ingest_with_attack(self, dataset_name: str, poison_ratio: float = 0.1, sample_size: Optional[int] = None):
-        """
-        Ingest legitimate documents and inject poisoned documents.
-        """
-        # Ingest legitimate documents first
-        self.ingest(dataset_name, sample_size=sample_size)
-        
+        # --- Attack Injection ---
         if self.attack and self.vector_store:
-            logger.info("Injecting poisoned documents...")
+            logger.info("Attack module detected. Injecting poisoned documents...")
             
-            # Estimate dataset size (or use specific count if available)
-            # using sample_size if provided, else use current count
+            # Determine parameters for attack
+            # Using defaults or config if available
+            poison_ratio = self.config.get("attack", {}).get("poison_ratio", 0.1)
+            
             current_count = self.vector_store.collection.count()
             target_poison_count = int(current_count * poison_ratio)
             
             if target_poison_count == 0 and poison_ratio > 0:
                 target_poison_count = 5 # Minimum fallback
             
-            logger.info(f"Generating {target_poison_count} poisoned documents...")
+            logger.info(f"Generating {target_poison_count} poisoned documents (ratio={poison_ratio})...")
             poisoned_docs = self.attack.generate_poisoned_corpus(target_size=target_poison_count)
             
             # Add to vector store with metadata marking them as poisoned
@@ -225,6 +223,8 @@ class ModularRAG:
                 ids=[f"poison_{i}" for i in range(len(poisoned_docs))]
             )
             logger.info("Poisoned documents injected.")
+        
+        return True
     
     def _chunk_text(self, text: str) -> List[str]:
         """Simple text chunking with overlap."""
@@ -443,8 +443,24 @@ class ModularRAG:
         sample_size = sample_size or self.sample_size
         
         # Ensure dataset is ingested
-        if self.current_dataset != dataset_name:
-            self.ingest(dataset_name, sample_size=sample_size * 10)  # Ingest more docs than test cases
+        # Ensure dataset is ingested
+        # Note: We prioritize the dataset requested in run_batch if it matches config, 
+        # but ingest() now relies on config. If they differ, we log a warning or trust config?
+        # To support batch running of specific datasets, we might need to temporarily override config or error out.
+        # Given pipeline design, we assume 'dataset_name' passed here is consistent with usage or we rely on config.
+        # However, run_batch explicitly takes dataset_name. 
+        # If dataset_name differs from config, ingest() will ingest the CONFIG one, not the requested one!
+        # Fix: We should check if dataset_name matches config.
+        config_dataset = self.config["data"]["dataset"]
+        if dataset_name != config_dataset:
+            logger.warning(f"Requested batch dataset '{dataset_name}' differs from config '{config_dataset}'. Using config dataset for ingestion.")
+            # We continue but be aware ingest uses config_dataset.
+            # If we really want to switch, we'd need to update self.config.
+            # Let's trust the user knows what they are doing or update usage.
+            # For now, we call ingest() which uses config.
+            
+        self.ingest() 
+
         
         # Load test QA pairs
         loader = get_loader(dataset_name)

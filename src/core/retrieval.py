@@ -16,11 +16,6 @@ logging.getLogger("httpx").setLevel(logging.ERROR)
 logging.getLogger("httpcore").setLevel(logging.ERROR)
 logging.getLogger("chromadb").setLevel(logging.WARNING)
 
-
-
-
-
-
 class LocalEmbedder:
     """Fast local embeddings using sentence-transformers (supports batching)."""
     

@@ -34,12 +34,13 @@ class BaseLoader(ABC):
         pass
     
     @abstractmethod
-    def load_qa_pairs(self, limit: Optional[int] = None) -> List[QAPair]:
+    def load_qa_pairs(self, limit: Optional[int] = None, seed: int = 42) -> List[QAPair]:
         """
         Load QA pairs with their gold passages.
         
         Args:
             limit: Maximum number of pairs to load
+            seed: Random seed for deterministic selection
             
         Returns:
             List of QAPair objects

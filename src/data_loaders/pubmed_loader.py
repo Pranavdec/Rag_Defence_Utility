@@ -14,16 +14,19 @@ class PubMedLoader(BaseLoader):
     def name(self) -> str:
         return "pubmedqa"
     
-    def load_qa_pairs(self, limit: Optional[int] = None) -> List[QAPair]:
+    def load_qa_pairs(self, limit: Optional[int] = None, seed: int = 42) -> List[QAPair]:
         """Load QA pairs from pqa_labeled."""
-        self._log(f"Loading QA pairs (limit={limit})...")
+        self._log(f"Loading QA pairs (limit={limit}, seed={seed})...")
         
         ds = load_dataset("qiaojin/PubMedQA", "pqa_labeled", split="train",
                           cache_dir=self.cache_dir)
         
+        # Shuffle deterministically
+        ds = ds.shuffle(seed=seed)
+        
         qa_pairs = []
         for i, row in enumerate(ds):
-            if limit and i >= limit:
+            if limit and len(qa_pairs) >= limit:
                 break
             
             question = row.get("question", "")

@@ -3,17 +3,12 @@ Generation module for LLM-based answer generation.
 Supports both Hugging Face Transformers (default) and Ollama.
 Provides a simple interface for text generation with RAG context.
 """
-import time
 from typing import List, Optional, Dict, Any
 import logging
 import torch
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Suppress noisy HTTP logs
-logging.getLogger("httpx").setLevel(logging.ERROR)
-logging.getLogger("httpcore").setLevel(logging.ERROR)
 
 
 class HuggingFaceGenerator:
@@ -81,7 +76,7 @@ class HuggingFaceGenerator:
         Generate an answer given a question and retrieved contexts.
         
         Returns:
-            dict with 'answer', 'latency_ms', 'model'
+            dict with 'answer', 'model'
         """
         # Build the prompt in chat format
         context_str = "\n\n".join([f"Context {i+1}:\n{ctx}" for i, ctx in enumerate(contexts)])
@@ -118,9 +113,6 @@ Answer:"""
             logger.warning(f"Chat template failed, using simple concatenation: {e}")
             formatted_prompt = f"{system_prompt}\n\n{user_prompt}"
         
-        # Time the generation
-        start_time = time.time()
-        
         # Tokenize
         inputs = self.llm.tokenizer(
             formatted_prompt, 
@@ -134,7 +126,7 @@ Answer:"""
                 inputs['input_ids'],
                 attention_mask=inputs['attention_mask'],
                 pad_token_id=self.llm.tokenizer.eos_token_id,
-                max_new_tokens=512,
+                # max_new_tokens=512,
                 do_sample=self.temperature > 0,
                 temperature=self.temperature if self.temperature > 0 else None,
                 use_cache=True,
@@ -143,12 +135,10 @@ Answer:"""
         # Decode only the new tokens
         generated_ids = outputs[:, inputs['input_ids'].shape[1]:]
         answer = self.llm.tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-        
-        latency_ms = (time.time() - start_time) * 1000
+
         
         return {
             "answer": answer.strip(),
-            "latency_ms": latency_ms,
             "model": self.model_path
         }
     
@@ -212,9 +202,6 @@ Question: {question}
 
 Answer:"""
         
-        # Time the generation
-        start_time = time.time()
-        
         response = ollama.chat(
             model=self.model_name,
             messages=[
@@ -224,13 +211,10 @@ Answer:"""
             options={"temperature": self.temperature}
         )
         
-        latency_ms = (time.time() - start_time) * 1000
-        
         answer = response["message"]["content"]
         
         return {
             "answer": answer,
-            "latency_ms": latency_ms,
             "model": self.model_name
         }
     
@@ -259,33 +243,17 @@ def create_generator(config: Dict[str, Any], defense_manager=None):
     """
     llm_config = config.get("system", {}).get("llm", {})
     
-    # Detect provider (new format) or auto-migrate from legacy format
+
     provider = llm_config.get("provider")
-    
-    if provider is None:
-        # Legacy config auto-migration
-        model_name = llm_config.get("model_name", "llama3")
-        
-        if "ollama" in model_name.lower() or model_name.lower() in ["llama3", "llama2", "mistral"]:
-            # Legacy Ollama config detected
-            logger.info(f"Auto-migrating legacy Ollama config (model_name: {model_name}) to HuggingFace")
-            logger.info("To explicitly use Ollama, set system.llm.provider: 'ollama' in config")
-            provider = "huggingface"  # Default to HuggingFace
-        else:
-            # Assume HuggingFace if model_name looks like HF path
-            provider = "huggingface"
-    
     provider = provider.lower()
     temperature = llm_config.get("temperature", 0.0)
     
     if provider == "ollama":
-        # Explicit Ollama usage
         model_name = llm_config.get("model_name", "llama3")
         logger.info(f"Using Ollama generator with model: {model_name}")
         return OllamaGenerator(model_name=model_name, temperature=temperature)
     
     elif provider == "huggingface" or provider == "hf":
-        # HuggingFace generator (default)
         model_path = llm_config.get("model_path", "meta-llama/Llama-3.1-8B-Instruct")
         device = llm_config.get("device", "auto")
         

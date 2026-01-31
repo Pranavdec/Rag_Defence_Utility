@@ -6,6 +6,7 @@ documents and evaluates the RAG system's ability to predict them.
 """
 
 import re
+import random
 import torch
 import numpy as np
 from typing import List, Dict, Tuple, Optional
@@ -14,6 +15,7 @@ import logging
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 
 
 class MBAFramework:
@@ -25,217 +27,324 @@ class MBAFramework:
     2. Membership Inference: Query RAG and classify based on prediction accuracy
     """
     
-    def __init__(self, M: int = 10, gamma: float = 0.5, device: str = "auto", 
-                 proxy_model: str = "gpt2-xl", enable_spelling: bool = False,
-                 max_document_words: int = 500):
+    def __init__(self, config: Dict[str, Any]):
         """
-        Initialize MBA Framework.
+        Initialize MBA Framework with configuration.
         
         Args:
-            M: Number of masks to generate per document
-            gamma: Prediction accuracy threshold for membership classification
-            device: Device for model execution ('cuda', 'cpu', or 'auto')
-            proxy_model: Proxy model name for difficulty scoring
-            enable_spelling: Enable spelling correction (disabled by default)
-            max_document_words: Maximum document length in words (default: 500)
+            config: Full configuration dictionary
         """
-        self.M = M
-        self.gamma = gamma
-        self.proxy_model_name = proxy_model
-        self.max_document_words = max_document_words
+        self.config = config
+        self.mba_config = config.get('attack', {}).get('mba', {})
+        self.data_config = config.get('data', {})
+        self.retrieval_config = config.get('retrieval', {})
         
-        # Force GPT-2 to CPU to avoid conflict with Llama on GPU
-        # This is necessary because both models can't efficiently share GPU memory
-        self.device = "cpu"
+        # Attack parameters
+        self.M = self.mba_config.get('M', 10)
+        self.gamma = self.mba_config.get('gamma', 0.5)
+        self.proxy_model_name = self.mba_config.get('proxy_model', "gpt2-xl")
+        self.max_document_words = self.mba_config.get('max_document_words', 500)
+        self.seed = self.mba_config.get('seed', 42)
         
-        logger.info(f"Initializing MBA Framework with M={M}, gamma={gamma}, device={self.device}")
-        logger.info("Note: GPT-2 runs on CPU to avoid GPU memory conflict with Llama")
+        # Ingestion/Data parameters (to match pipeline)
+        self.ingestion_size = self.data_config.get('ingestion_size', 1000)
+        self.ingestion_seed = self.data_config.get('ingestion_seed', 42)
+        self.dataset_name = self.data_config.get('dataset', 'nq')
         
-        # Initialize proxy model for mask generation
-        logger.info(f"Loading proxy model ({proxy_model})...")
-        self.proxy_tokenizer = GPT2Tokenizer.from_pretrained(proxy_model)
-        self.proxy_model = GPT2LMHeadModel.from_pretrained(proxy_model)
+        # Chunking parameters (to match pipeline)
+        self.chunk_size = self.retrieval_config.get('chunk_size', 512)
+        self.chunk_overlap = self.retrieval_config.get('chunk_overlap', 50)
+        
+        # Device settings
+        self.device = "cpu" # Force CPU for GPT-2 to avoid conflict
+        
+        logger.info(f"Initializing MBA Framework: M={self.M}, gamma={self.gamma}")
+        logger.info(f"Data Sync: dataset={self.dataset_name}, size={self.ingestion_size}, seed={self.ingestion_seed}")
+        
+        # Initialize proxy model
+        logger.info(f"Loading proxy model ({self.proxy_model_name})...")
+        self.proxy_tokenizer = GPT2Tokenizer.from_pretrained(self.proxy_model_name)
+        self.proxy_model = GPT2LMHeadModel.from_pretrained(self.proxy_model_name)
         self.proxy_model.to(self.device)
         self.proxy_model.eval()
         
-        # Spelling correction (disabled by default to save memory)
-        self.spelling_enabled = enable_spelling
+        # Spelling correction
+        self.spelling_enabled = self.mba_config.get('enable_spelling_correction', False)
         if self.spelling_enabled:
             logger.info("Loading spelling correction model...")
             try:
-                self.spell_tokenizer = AutoTokenizer.from_pretrained(
-                    "oliverguhr/spelling-correction-english-base"
-                )
-                self.spell_model = AutoModelForSeq2SeqLM.from_pretrained(
-                    "oliverguhr/spelling-correction-english-base"
-                )
+                self.spell_tokenizer = AutoTokenizer.from_pretrained("oliverguhr/spelling-correction-english-base")
+                self.spell_model = AutoModelForSeq2SeqLM.from_pretrained("oliverguhr/spelling-correction-english-base")
                 self.spell_model.to(self.device)
                 self.spell_model.eval()
             except Exception as e:
-                logger.warning(f"Could not load spelling model: {e}. Disabling spelling correction.")
+                logger.warning(f"Could not load spelling model: {e}. Disabling.")
                 self.spelling_enabled = False
         else:
             logger.info("Spelling correction disabled")
-        
-        logger.info("MBA Framework initialized successfully")
-    
-    def generate_masks(self, document: str) -> Tuple[str, Dict[str, str]]:
-        """
-        Generate strategically placed masks in a document.
-        
-        Args:
-            document: Target document text
             
-        Returns:
-            Tuple of (masked_document, answer_key) where answer_key maps mask labels to answers
+    def _chunk_text(self, text: str) -> List[str]:
         """
-        # Store original document
-        original_document = document
-        
-        # Truncate very long documents for mask generation (but we'll apply masks to full doc)
-        words_in_doc = document.split()
-        truncated = False
-        if len(words_in_doc) > self.max_document_words:
-            logger.warning(f"Document has {len(words_in_doc)} words, truncating to {self.max_document_words} for mask generation")
-            document = " ".join(words_in_doc[:self.max_document_words])
-            truncated = True
-        
-        # Step 1: Tokenize and extract candidate words
-        words = self._extract_candidate_words(document)
-        
-        if len(words) == 0:
-            logger.warning("No candidate words found in document")
-            return document, {}
-        
-        # Pre-filter: Limit candidates to 3-5x the number of masks needed (for speed)
-        # This significantly speeds up scoring while maintaining quality
-        max_candidates = min(len(words), self.M * 3)  # Reduced from 5x to 3x for speed
-        if len(words) > max_candidates:
-            # Sample evenly across document to get diverse candidates
-            import random
-            step = len(words) // max_candidates
-            words = [words[i] for i in range(0, len(words), max(1, step))][:max_candidates]
-        
-        logger.info(f"Pre-filtered to {len(words)} candidate words")
-        
-        # Step 2: Extract fragmented words (split by tokenizer)
-        fragmented_words = self._extract_fragmented(words, document)
-        logger.info(f"After deduplication: {len(fragmented_words)} unique words")
-        
-        # Step 3: Correct misspellings (if enabled)
-        if self.spelling_enabled:
-            corrected_words = self._correct_spelling(fragmented_words, document)
-        else:
-            corrected_words = fragmented_words
-        
-        # Step 4: Calculate rank scores using proxy model
-        logger.info(f"Scoring {len(corrected_words)} words with GPT-2...")
-        rank_scores = self._calculate_rank_scores(document, corrected_words)
-        
-        if len(rank_scores) == 0:
-            logger.warning("No words could be scored")
-            return document, {}
-        
-        # Step 5: Select M words with highest ranks (evenly distributed)
-        masked_indices = self._select_strategic_masks(document, rank_scores)
-        
-        # Step 6: Create masked document and answer key
-        # Apply masks to original document if truncated, otherwise use processed doc
-        if truncated:
-            # Apply masks to original full document by finding words in original
-            masked_doc, answer_key = self._integrate_masks_in_full_doc(
-                original_document, masked_indices, document
-            )
-        else:
-            masked_doc, answer_key = self._integrate_masks(document, masked_indices)
-        
-        return masked_doc, answer_key
-    
-    def attack(self, target_document: str, rag_system) -> Dict:
+        Chunk text exactly as the pipeline does.
+        This ensures we are testing the actual units of information stored in the RAG.
         """
-        Execute membership inference attack on a target document.
+        if len(text) <= self.chunk_size:
+            return [text]
         
-        Args:
-            target_document: Document to test for membership
-            rag_system: RAG system instance with run_single(question) method
-            
-        Returns:
-            Dictionary with attack results:
-                - is_member: Boolean membership prediction
-                - accuracy: Prediction accuracy (0-1)
-                - predicted: Dict of predicted mask values
-                - ground_truth: Dict of actual mask values
-                - num_masks: Number of masks used
-        """
-        logger.info("Generating masks for target document...")
-        masked_query, answer_key = self.generate_masks(target_document)
+        chunks = []
+        start = 0
+        while start < len(text):
+            end = start + self.chunk_size
+            chunk = text[start:end]
+            chunks.append(chunk)
+            start = end - self.chunk_overlap
         
-        if len(answer_key) == 0:
-            logger.warning("No masks generated, cannot perform attack")
-            return {
-                'is_member': False,
-                'accuracy': 0.0,
-                'predicted': {},
-                'ground_truth': answer_key,
-                'num_masks': 0
-            }
-        
-        # Query RAG system
-        prompt = f"Fill in the masked words in the following text. Provide answers in the format '[Mask_X]: answer'.\n\n{masked_query}\n\nProvide the predicted words for each mask:"
-        
-        logger.info(f"Querying RAG system with {len(answer_key)} masks...")
-        try:
-            response = rag_system.run_single(prompt)
-            # Handle different response types
-            if isinstance(response, dict):
-                response_text = response.get('answer', '')
-                # If answer is still a dict or non-string, try to extract or convert
-                if isinstance(response_text, dict):
-                    response_text = str(response_text)
-                elif not isinstance(response_text, str):
-                    response_text = str(response_text)
-            else:
-                response_text = str(response)
-        except Exception as e:
-            logger.error(f"Error querying RAG system: {e}")
-            return {
-                'is_member': False,
-                'accuracy': 0.0,
-                'predicted': {},
-                'ground_truth': answer_key,
-                'num_masks': len(answer_key),
-                'error': str(e)
-            }
+        return chunks
 
-        logger.info(f"RAG response: {response_text}, prompt: {prompt}")
+    def load_and_prepare_data(self) -> Tuple[List[str], List[str]]:
+        """
+        Load dataset and split into members and non-members.
+        Applies chunking to match RAG ingestion.
         
-        # Parse response to extract predicted mask values
-        predicted = self._parse_mask_answers(response_text, len(answer_key))
-        
-        # Calculate accuracy
-        correct = 0
-        for mask_label, true_answer in answer_key.items():
-            pred_answer = predicted.get(mask_label, "").strip().lower()
-            true_answer_clean = true_answer.strip().lower()
+        Returns:
+            Tuple[List[str], List[str]]: (member_chunks, non_member_chunks)
+        """
+        from ..data_loaders.nq_loader import NQLoader
+        from ..data_loaders.trivia_loader import TriviaLoader
+        from ..data_loaders.pubmed_loader import PubMedLoader
+
+        # Loader Factory
+        if self.dataset_name == 'nq':
+            loader = NQLoader(cache_dir=self.config.get('paths', {}).get('cache', 'data/raw'))
+        elif self.dataset_name == 'triviaqa':
+            loader = TriviaLoader(cache_dir=self.config.get('paths', {}).get('cache', 'data/raw'))
+        elif self.dataset_name == 'pubmedqa':
+            loader = PubMedLoader(cache_dir=self.config.get('paths', {}).get('cache', 'data/raw'))
+        else:
+            raise ValueError(f"Unknown dataset: {self.dataset_name}")
             
-            # Check exact match or substring match
-            if pred_answer == true_answer_clean or true_answer_clean in pred_answer:
-                correct += 1
+        # Determine how many items to load
+        # We need ingestion_size (Members) + num_non_members (Non-Members)
+        # We add a buffer to ensure we have enough valid chunks
+        num_non_members_target = self.mba_config.get('num_non_members', 50)
+        total_needed = self.ingestion_size + num_non_members_target + 20 
         
-        accuracy = correct / len(answer_key) if len(answer_key) > 0 else 0.0
+        logger.info(f"Loading {total_needed} QA pairs from {self.dataset_name} (seed={self.ingestion_seed})...")
+        qa_pairs = loader.load_qa_pairs(limit=total_needed, seed=self.ingestion_seed)
         
-        # Membership decision
-        is_member = accuracy > self.gamma
+        if not qa_pairs:
+            logger.error("No data loaded!")
+            return [], []
+            
+        # Split into Member Candidates and Non-Member Candidates at the QA Pair level
+        # The first 'ingestion_size' pairs correspond to what was ingested
+        member_pairs = qa_pairs[:self.ingestion_size]
+        non_member_pairs = qa_pairs[self.ingestion_size:]
         
-        logger.info(f"Attack complete: accuracy={accuracy:.2f}, is_member={is_member}")
+        logger.info(f"Split: {len(member_pairs)} Member pairs, {len(non_member_pairs)} Non-Member pairs")
+        
+        # Process and Chunk Members
+        member_chunks = []
+        for pair in member_pairs:
+            for passage in pair.gold_passages:
+                chunks = self._chunk_text(passage)
+                member_chunks.extend(chunks)
+                
+        # Process and Chunk Non-Members
+        non_member_chunks = []
+        for pair in non_member_pairs:
+            for passage in pair.gold_passages:
+                chunks = self._chunk_text(passage)
+                non_member_chunks.extend(chunks)
+                
+        logger.info(f"Generated {len(member_chunks)} Member chunks, {len(non_member_chunks)} Non-Member chunks")
+        return member_chunks, non_member_chunks
+
+    def generate_attack_dataset(self) -> List[Dict]:
+        """
+        Generate the full attack dataset (both members and non-members).
+        
+        Returns:
+            List of attack payloads
+        """
+        member_chunks, non_member_chunks = self.load_and_prepare_data()
+        
+        target_members = self.mba_config.get('num_members', 50)
+        target_non_members = self.mba_config.get('num_non_members', 50)
+        
+        payloads = []
+        
+        # Sample Members
+        if member_chunks:
+            rng = random.Random(self.seed)
+            selected_members = rng.sample(member_chunks, min(len(member_chunks), target_members))
+            
+            # Create IDs
+            msg = f"Generating {len(selected_members)} MEMBER payloads"
+            logger.info(msg)
+            member_ids = [f"member_{i}_{self.seed}" for i in range(len(selected_members))]
+            
+            payloads.extend(self._create_payloads(selected_members, member_ids, is_member=True))
+            
+        # Sample Non-Members
+        if non_member_chunks:
+            rng = random.Random(self.seed + 1) # Different seed offset
+            selected_non_members = rng.sample(non_member_chunks, min(len(non_member_chunks), target_non_members))
+            
+            msg = f"Generating {len(selected_non_members)} NON-MEMBER payloads"
+            logger.info(msg)
+            non_member_ids = [f"non_member_{i}_{self.seed}" for i in range(len(selected_non_members))]
+            
+            payloads.extend(self._create_payloads(selected_non_members, non_member_ids, is_member=False))
+            
+        logger.info(f"Total attack payloads generated: {len(payloads)}")
+        return payloads
+
+    # Deprecated/Legacy methods kept for compatibility or removed if not needed?
+    # User asked to "edit" so I will replace the generation methods.
+    # The old generate_member_payloads was called externally. Now we have a unified one.
+    # I'll keep _create_payloads helper.
+    
+    def generate_member_payloads(self, *args, **kwargs):
+        logger.warning("generate_member_payloads is deprecated. Use generate_attack_dataset()")
+        return []
+
+    def generate_non_member_payloads(self, *args, **kwargs):
+        logger.warning("generate_non_member_payloads is deprecated. Use generate_attack_dataset()")
+        return []
+
+    def _create_payloads(self, documents: List[str], ids: List[str], is_member: bool) -> List[Dict]:
+        """Helper to create payloads from docs."""
+        payloads = []
+        for i, doc in enumerate(documents):
+            if not doc:
+                continue
+                
+            doc_id = ids[i]
+            
+            # Generate masks
+            masked_doc, answer_key = self.generate_masks(doc)
+            
+            if not answer_key:
+                continue
+                
+            # Create query prompt
+            prompt = f"Fill in the masked words in the following text. Provide answers in the format '[Mask_X]: answer'.\n\n{masked_doc}\n\nProvide the predicted words for each mask:"
+            
+            payload = {
+                'id': doc_id,
+                'query': prompt,
+                'ground_truth': answer_key,
+                'original_document': doc,
+                'masked_document': masked_doc,
+                'is_member': is_member
+            }
+            payloads.append(payload)
+            
+        return payloads
+
+    def evaluate_attack_results(self, attack_payloads: List[Dict], responses: List[str]) -> Dict:
+        """
+        Evaluate attack results against ground truth.
+        Handles both Member and Non-Member cases.
+        
+        Args:
+            attack_payloads: List of payloads 
+            responses: List of text responses from the RAG system
+            
+        Returns:
+            Dictionary with evaluation metrics (accuracy, precision, recall, f1)
+        """
+        if len(attack_payloads) != len(responses):
+            logger.warning(f"Number of payloads ({len(attack_payloads)}) mismatches responses ({len(responses)})")
+        
+        total_items = min(len(attack_payloads), len(responses))
+        if total_items == 0:
+            return {'accuracy': 0.0, 'precision': 0.0, 'recall': 0.0, 'f1': 0.0, 'details': []}
+            
+        true_positives = 0  # Member correctly predicted as Member
+        false_positives = 0 # Non-Member predicted as Member
+        true_negatives = 0  # Non-Member correctly predicted as Non-Member
+        false_negatives = 0 # Member predicted as Non-Member
+        
+        results_details = []
+        
+        for i in range(total_items):
+            payload = attack_payloads[i]
+            response = responses[i]
+            ground_truth = payload['ground_truth']
+            is_member_actual = payload.get('is_member', True) # Default to True if missing
+            
+            num_masks = len(ground_truth)
+            
+            # Parse response
+            predicted = self._parse_mask_answers(response, num_masks)
+            
+            # Check correctness of masks
+            item_correct_masks = 0
+            for mask_label, true_answer in ground_truth.items():
+                pred_answer = predicted.get(mask_label, "").strip().lower()
+                true_answer_clean = true_answer.strip().lower()
+                
+                # Check exact match or substring match
+                if pred_answer == true_answer_clean or true_answer_clean in pred_answer:
+                    item_correct_masks += 1
+            
+            item_accuracy = item_correct_masks / num_masks if num_masks > 0 else 0.0
+            
+            # Membership decision (Prediction: Is it a member?)
+            # If accuracy > gamma, we predict it IS a member.
+            is_member_prediction = item_accuracy > self.gamma
+            
+            # Update confusion matrix
+            if is_member_actual:
+                if is_member_prediction:
+                    true_positives += 1
+                else:
+                    false_negatives += 1
+            else:
+                if is_member_prediction:
+                    false_positives += 1
+                else:
+                    true_negatives += 1
+                
+            results_details.append({
+                'id': payload['id'],
+                'is_member_actual': is_member_actual,
+                'is_member_prediction': is_member_prediction,
+                'mask_accuracy': item_accuracy,
+                'predicted': predicted,
+                'ground_truth': ground_truth,
+                'response_snippet': response[:100] + "..." if len(response) > 100 else response
+            })
+            
+        # Overall metrics
+        total = true_positives + true_negatives + false_positives + false_negatives
+        accuracy = (true_positives + true_negatives) / total if total > 0 else 0.0
+        
+        precision = true_positives / (true_positives + false_positives) if (true_positives + false_positives) > 0 else 0.0
+        recall = true_positives / (true_positives + false_negatives) if (true_positives + false_negatives) > 0 else 0.0
+        f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+        
+        # Calculate average mask accuracy across all items
+        mask_accuracies = [d['mask_accuracy'] for d in results_details]
+        avg_mask_accuracy = sum(mask_accuracies) / len(mask_accuracies) if mask_accuracies else 0.0
+        
+        logger.info(f"Evaluation: Acc={accuracy:.2f}, Pre={precision:.2f}, Rec={recall:.2f}, F1={f1:.2f}")
+        logger.info(f"Avg Mask Accuracy: {avg_mask_accuracy:.2f}")
+        logger.info(f"Confusion Matrix: TP={true_positives}, TN={true_negatives}, FP={false_positives}, FN={false_negatives}")
         
         return {
-            'is_member': is_member,
             'accuracy': accuracy,
-            'predicted': predicted,
-            'ground_truth': answer_key,
-            'num_masks': len(answer_key),
-            'correct_predictions': correct
+            'precision': precision,
+            'recall': recall,
+            'f1': f1,
+            'avg_mask_accuracy': avg_mask_accuracy,
+            'confusion_matrix': {
+                'tp': true_positives, 'tn': true_negatives, 
+                'fp': false_positives, 'fn': false_negatives
+            },
+            'details': results_details
         }
     
     def _extract_candidate_words(self, document: str) -> List[str]:

@@ -17,7 +17,6 @@ class TrustRAGDefense(BaseDefense):
     """
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        # Ensure thresholds are floats (LLM might pass strings)
         sim_thresh = config.get("similarity_threshold", 0.88)
         rouge_thresh = config.get("rouge_threshold", 0.25)
         
@@ -47,7 +46,7 @@ class TrustRAGDefense(BaseDefense):
         logger.info(f"[TrustRAG] Increasing retrieval limit from {top_k} to {fetch_k}")
         return query, fetch_k
 
-    def post_retrieval(self, documents: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
+    def post_retrieval(self, documents: List[Dict[str, Any]], query: str = "") -> List[Dict[str, Any]]:
         """
         Filter documents using TrustRAG's K-means defense mechanism.
         """
@@ -65,9 +64,7 @@ class TrustRAGDefense(BaseDefense):
         
         filtered_texts, _ = self.trustrag_kmeans_filter(
             doc_texts, 
-            embeddings,
-            self.similarity_threshold,
-            self.rouge_threshold
+            embeddings
         )
         
         # reconstruct the list of dicts, preserving the order of the remaining documents 
@@ -93,7 +90,7 @@ class TrustRAGDefense(BaseDefense):
         # Return filtered docs (will be limited to top_k by manager)
         return filtered_docs
 
-    def trustrag_kmeans_filter(self, documents, embeddings, similarity_threshold=0.88, rouge_threshold=0.25):
+    def trustrag_kmeans_filter(self, documents, embeddings):
         """
         Filter retrieved documents using TrustRAG's K-means defense mechanism.
         
@@ -164,26 +161,26 @@ class TrustRAGDefense(BaseDefense):
             for i in range(len(docs)):
                 for j in range(i + 1, len(docs)):
                     score = scorer.score(docs[i], docs[j])['rougeL'].fmeasure
-                    if score > rouge_threshold:
+                    if score > self.rouge_threshold:
                         del_indices.add(j)
             
             filtered = [doc for idx, doc in enumerate(docs) if idx not in del_indices]
             return filtered, del_indices
         
         # Defense decision logic
-        if sim_0 > similarity_threshold and sim_1 > similarity_threshold:
+        if sim_0 > self.similarity_threshold and sim_1 > self.similarity_threshold:
             # Both clusters suspicious - discard all
             logger.info("[TrustRAG] Both clusters suspicious - discarding all")
             return [], []
         
-        elif sim_0 > similarity_threshold:
+        elif sim_0 > self.similarity_threshold:
             # Cluster 0 is malicious, keep cluster 1
             logger.info("[TrustRAG] Cluster 0 suspicious - keeping cluster 1")
             filtered_docs, _ = ngram_filter(cluster_1_docs)
             filtered_emb = [cluster_1_emb[i] for i, doc in enumerate(cluster_1_docs) if doc in filtered_docs]
             return filtered_docs, filtered_emb
         
-        elif sim_1 > similarity_threshold:
+        elif sim_1 > self.similarity_threshold:
             # Cluster 1 is malicious, keep cluster 0
             logger.info("[TrustRAG] Cluster 1 suspicious - keeping cluster 0")
             filtered_docs, _ = ngram_filter(cluster_0_docs)
@@ -201,3 +198,15 @@ class TrustRAGDefense(BaseDefense):
             kept_emb_1 = [cluster_1_emb[i] for i, doc in enumerate(cluster_1_docs) if doc in filtered_1]
             
             return filtered_0 + filtered_1, kept_emb_0 + kept_emb_1
+
+    def set_similarity_threshold(self, threshold: float):
+        self.similarity_threshold = threshold
+
+    def set_rouge_threshold(self, threshold: float):
+        self.rouge_threshold = threshold
+
+    def get_similarity_threshold(self):
+        return self.similarity_threshold
+
+    def get_rouge_threshold(self):
+        return self.rouge_threshold

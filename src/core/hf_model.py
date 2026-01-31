@@ -256,8 +256,13 @@ class Llama(Model):
                 if start_t < len(total_attention_values) and end_t <= len(total_attention_values):
                     attention_slice = total_attention_values[start_t: end_t]
                     if attention_slice:
-                        top_alpha = sorted(attention_slice, reverse=True)[:min(top_tokens, len(attention_slice))] 
-                        score = sum(top_alpha)
+                        if top_tokens is None:
+                            # Use all tokens (alpha = infinity)
+                            score = sum(attention_slice)
+                        else:
+                            # Use top-alpha tokens
+                            top_alpha = sorted(attention_slice, reverse=True)[:min(top_tokens, len(attention_slice))] 
+                            score = sum(top_alpha)
                     else:
                         score = 0
                 else:

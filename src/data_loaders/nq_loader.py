@@ -27,9 +27,10 @@ class NQLoader(BaseLoader):
     def name(self) -> str:
         return "nq-corpus"
     
-    def load_qa_pairs(self, limit: Optional[int] = None) -> List[QAPair]:
+    def load_qa_pairs(self, limit: Optional[int] = None, seed: int = 42) -> List[QAPair]:
         """Load QA pairs using qrels to match queries to gold docs and extract answers."""
-        self._log(f"Loading QA pairs (limit={limit})...")
+        import random
+        self._log(f"Loading QA pairs (limit={limit}, seed={seed})...")
         
         dataset = ir_datasets.load("dpr-w100/natural-questions/dev")
         
@@ -53,21 +54,43 @@ class NQLoader(BaseLoader):
                 all_doc_ids.add(qrel.doc_id)
         self._log(f"Loaded {len(qrels)} query-doc mappings")
         
+        # Determine which queries to process
+        query_ids = list(qrels.keys())
+        query_ids.sort() # Ensure stable order before shuffling
+        
+        rng = random.Random(seed)
+        rng.shuffle(query_ids)
+        
+        if limit and limit < len(query_ids):
+            selected_query_ids = query_ids[:limit]
+        else:
+            selected_query_ids = query_ids
+            
+        # Filter relevant doc IDs to fetch (optimization: only fetch what we need?)
+        # Current logic fetches ALL unique docs from ALL qrels. 
+        # For efficiency if limit is small, we should only fetch docs for selected queries.
+        # However, to avoid major logic changes, we'll stick to fetching what is needed for selected queries.
+        needed_doc_ids = set()
+        for qid in selected_query_ids:
+            for did in qrels[qid]:
+                needed_doc_ids.add(did)
+        
         # Fetch documents
-        self._log(f"Fetching {len(all_doc_ids)} relevant documents...")
+        self._log(f"Fetching {len(needed_doc_ids)} relevant documents for {len(selected_query_ids)} queries...")
         docs_store = dataset.docs_store()
-        docs_lookup = docs_store.get_many(all_doc_ids)
+        docs_lookup = docs_store.get_many(needed_doc_ids)
         
         # Extract text from DprW100Doc objects
         docs_lookup = {doc_id: doc.text for doc_id, doc in docs_lookup.items()}
-        self._log(f"Loaded {len(docs_lookup)} documents")
+        # self._log(f"Loaded {len(docs_lookup)} documents") # Removed valid log line? Keep if useful.
         
         # Create QA pairs
         qa_pairs = []
-        for query_id, doc_ids in qrels.items():
-            if limit and len(qa_pairs) >= limit:
-                break
+        for query_id in selected_query_ids:
+            # Check implicit limit check not needed since we sliced keys, but safety
+            # if limit and len(qa_pairs) >= limit: break 
             
+            doc_ids = qrels.get(query_id, [])
             query_data = queries_lookup.get(query_id)
             if not query_data:
                 continue

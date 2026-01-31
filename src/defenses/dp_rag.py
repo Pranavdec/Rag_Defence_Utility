@@ -28,7 +28,7 @@ class DifferentialPrivacyDefense(BaseDefense):
         logger.info(f"[DP Defense] Increasing retrieval limit from {top_k} to {fetch_k}")
         return query, fetch_k
 
-    def post_retrieval(self, documents: List[Dict[str, Any]], query: str) -> List[Dict[str, Any]]:
+    def post_retrieval(self, documents: List[Dict[str, Any]], query: str = "") -> List[Dict[str, Any]]:
         """
         Filter documents based on DP threshold.
         """
@@ -107,3 +107,15 @@ class DifferentialPrivacyDefense(BaseDefense):
         
         noisy_threshold = kth_score + np.random.normal(0, noise_scale)
         return noisy_threshold
+
+    def set_epsilon(self, epsilon: float):
+        self.epsilon = epsilon
+
+    def set_delta(self, delta: float):
+        self.delta = delta
+
+    def get_epsilon(self):
+        return self.epsilon
+
+    def get_delta(self):
+        return self.delta
