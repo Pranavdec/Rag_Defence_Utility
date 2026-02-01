@@ -5,7 +5,7 @@ system:
     model_path: meta-llama/Llama-3.1-8B-Instruct
     device: auto
     temperature: 0.0
-    model_name: llama3
+    model_name: llama3 # only when provider is ollama
   judge_llm: llama3
 
 paths:
@@ -13,13 +13,13 @@ paths:
   results: data/results
   cache: data/raw
 data:
-  dataset: nq
+  dataset: pubmedqa # nq, pubmedqa, triviaqa
   ingestion_size: 700
   ingestion_seed: 42
-  test_size: 50
+  test_size: 5
   test_seed: 123
 evaluation:
-  skip_deepeval: false
+  skip_deepeval: true
   deepeval_max_concurrent: 5
 retrieval:
   top_k: 5
@@ -28,7 +28,7 @@ retrieval:
 defenses:
 - name: differential_privacy
   enabled: false
-  method: dp_approx
+  method: dp_approx # or dp_pure
   epsilon: 3.0
   delta: 0.01
   candidate_multiplier: 3
@@ -47,27 +47,27 @@ defenses:
   candidate_multiplier: 3
 attack:
   mba:
-    enabled: false
+    enabled: true
     M: 5
     gamma: 0.35
-    num_members: 30
-    num_non_members: 20
+    num_members: 5 # no.of memebrs data used for attack
+    num_non_members: 5 # no.of non memebrs data used for attack
     device: auto
     proxy_model: gpt2-xl
     enable_spelling_correction: false
     max_document_words: 200
     seed: 1235213
   poisoned_rag:
-    enabled: false
+    enabled: true
     poisoning_rate: 10
-    num_targets: 50
+    num_targets: 5
     seed: 42
     target_start_index: 0
     diversity_level: true
 ado:
-  enabled: false
+  enabled: true
   user_id: test_user_001
   sentinel_model: llama3
   strategist_model: llama3
-  strategist_mode: llm
+  strategist_mode: llm # deterministic or llm
   trust_score_decay: 0.05

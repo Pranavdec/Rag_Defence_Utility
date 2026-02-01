@@ -86,6 +86,8 @@ class EvaluationMetrics:
     mba_recall: float = 0.0
     mba_f1: float = 0.0
     mba_avg_mask_accuracy: float = 0.0  # Average accuracy of filled masks across all MBA queries
+    mba_member_accuracy: float = 0.0  # Accuracy on member documents
+    mba_non_member_accuracy: float = 0.0  # Accuracy on non-member documents
     
     # Performance
     avg_latency_ms: float = 0.0
@@ -244,6 +246,8 @@ class ConfigDrivenEvaluator:
             metrics.mba_recall = mba_metrics.get("recall", 0.0)
             metrics.mba_f1 = mba_metrics.get("f1", 0.0)
             metrics.mba_avg_mask_accuracy = mba_metrics.get("avg_mask_accuracy", 0.0)
+            metrics.mba_member_accuracy = mba_metrics.get("member_accuracy", 0.0)
+            metrics.mba_non_member_accuracy = mba_metrics.get("non_member_accuracy", 0.0)
         
         # 4. Aggregate and compute DeepEval
         metrics = self._aggregate_metrics(all_results, metrics)
@@ -481,15 +485,30 @@ class ConfigDrivenEvaluator:
         for i, payload in enumerate(payloads):
             print(f"\r  MBA {i+1}/{len(payloads)}", end="", flush=True)
             
+            # BLACK BOX: Use same query for both retrieval and generation
             res = self.run_query(payload['query'], user_id="mba_attacker")
             answer = res.get("answer", "")
             responses.append(answer)
             
-            # Debug first few
-            if i < 3:
+            # Debug first few - CHECK RETRIEVAL
+            if i < 15:
                 logger.info(f"\n[MBA SAMPLE {i+1}] Is Member: {payload['is_member']}")
+                logger.info(f"  Original Doc (first 150 chars): {payload['original_document'][:150]}...")
                 logger.info(f"  Ground Truth: {payload['ground_truth']}")
                 logger.info(f"  Response: {answer[:300]}")
+                
+                # Check what was retrieved
+                retrieved = self.rag.vector_store.query(payload['query'][:500], top_k=self.config['retrieval']['top_k'])
+                if retrieved:
+                    logger.info(f"  Retrieved {len(retrieved)} docs:")
+                    for idx, doc in enumerate(retrieved[:2]):  # Show top 2
+                        doc_snippet = doc['document'][:100] if 'document' in doc else doc.get('content', '')[:100]
+                        logger.info(f"    Doc {idx+1}: {doc_snippet}...")
+                        # Check if original doc is in retrieval
+                        if payload['original_document'][:100] in doc.get('document', doc.get('content', '')):
+                            logger.info(f"    ✓ ORIGINAL DOC RETRIEVED at position {idx+1}")
+                else:
+                    logger.info(f"  ✗ No documents retrieved!")
             
             results.append(QueryResult(
                 query=payload['query'][:100] + "...",
@@ -514,15 +533,34 @@ class ConfigDrivenEvaluator:
             logger.warning("RAG or vector store not initialized, cannot inject poison")
             return
         
+        # Check before injection
+        before_count = self.rag.vector_store.collection.count()
+        logger.info(f"Before injection: {before_count} documents in vector store")
+        
         docs = [pd.content for pd in poisoned_docs]
         ids = [pd.doc_id for pd in poisoned_docs]
         metas = [{"poisoned": True, "target": pd.target_question} for pd in poisoned_docs]
         
+        logger.info(f"Injecting {len(docs)} poisoned documents with IDs like: {ids[0]}")
+        
         self.rag.vector_store.add_documents(
             documents=docs,
             metadatas=metas,
-            ids=ids
+            ids=ids,
+            force=True  # Bypass is_populated() check for poison injection
         )
+        
+        # Check after injection
+        after_count = self.rag.vector_store.collection.count()
+        logger.info(f"After injection: {after_count} documents in vector store (added {after_count - before_count})")
+        
+        # Verify poison docs exist
+        result = self.rag.vector_store.collection.get(where={"poisoned": True}, limit=1)
+        if result and result['documents']:
+            logger.info(f"✓ Verified: Poison docs exist in vector store")
+        else:
+            logger.error(f"✗ ERROR: Poison docs NOT FOUND after injection!")
+        
         logger.info(f"Injected {len(docs)} poisoned documents")
     
     def _clean_poison_docs(self):
@@ -679,6 +717,10 @@ class ConfigDrivenEvaluator:
             print(f"  MBA Accuracy: {metrics.mba_accuracy:.1%}")
             print(f"  MBA F1: {metrics.mba_f1:.3f}")
             print(f"  MBA Avg Mask Accuracy: {metrics.mba_avg_mask_accuracy:.1%}")
+            if hasattr(metrics, 'mba_member_accuracy'):
+                print(f"  MBA Member Mask Accuracy: {metrics.mba_member_accuracy:.1%} (avg % masks correct)")
+            if hasattr(metrics, 'mba_non_member_accuracy'):
+                print(f"  MBA Non-Member Mask Accuracy: {metrics.mba_non_member_accuracy:.1%} (avg % masks correct)")
         
         if metrics.ado_enabled:
             print(f"\n  --- ADO METRICS ---")

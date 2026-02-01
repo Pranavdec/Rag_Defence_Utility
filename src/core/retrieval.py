@@ -77,13 +77,14 @@ class VectorStore:
         documents: List[str],
         metadatas: Optional[List[dict]] = None,
         ids: Optional[List[str]] = None,
-        batch_size: int = 100
+        batch_size: int = 100,
+        force: bool = False
     ):
         """
         Add documents to the vector store in batches.
-        Skips if already populated.
+        Skips if already populated unless force=True.
         """
-        if self.is_populated():
+        if self.is_populated() and not force:
             logger.info(f"Collection already populated, skipping ingestion.")
             return
         

@@ -170,9 +170,15 @@ class Llama(Model):
                 else:
                     # element-wise sum
                     total_attention_values = [sum(x) for x in zip(total_attention_values, current_values)]
+                
+                # Clean up intermediate tensors
+                del attention_tensor, attention_scores, avg_attention, token_attention
 
             except Exception as e:
                 logger.warning(f"Error calculating attention for token {i}: {e}")
+                # Clean up on error to prevent memory leaks
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                 continue
         
         # Map tokens back to passages using regex
@@ -272,5 +278,10 @@ class Llama(Model):
             passage_scores.append(score)
             
         total_attention_score = sum(total_attention_values) if total_attention_values is not None else 10
+        
+        # Clean up attention tensors to free GPU memory
+        del outputs
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         
         return result, passage_scores, total_attention_score

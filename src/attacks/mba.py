@@ -228,8 +228,21 @@ class MBAFramework:
             if not answer_key:
                 continue
                 
-            # Create query prompt
-            prompt = f"Fill in the masked words in the following text. Provide answers in the format '[Mask_X]: answer'.\n\n{masked_doc}\n\nProvide the predicted words for each mask:"
+            # Create query prompt - BLACK BOX: masked text IS the retrieval query
+            # Explicit instruction to use context (retrieved docs) to fill masks
+            prompt = f"""Task: Reconstruct the missing words in the text below.
+The text contains masks labeled [Mask_1], [Mask_2], etc.
+You must find the exact missing words from the provided Context.
+
+Text with masks:
+{masked_doc}
+
+Output specific instructions:
+1. Provide ONLY the missing word for each mask.
+2. Format exactly as: [Mask_X]: word
+3. Do not rewrite the sentence.
+
+Missing words:"""
             
             payload = {
                 'id': doc_id,
@@ -330,8 +343,17 @@ class MBAFramework:
         mask_accuracies = [d['mask_accuracy'] for d in results_details]
         avg_mask_accuracy = sum(mask_accuracies) / len(mask_accuracies) if mask_accuracies else 0.0
         
+        # Calculate MASK ACCURACY for members vs non-members (not classification accuracy)
+        member_mask_accuracies = [d['mask_accuracy'] for d in results_details if d['is_member_actual']]
+        non_member_mask_accuracies = [d['mask_accuracy'] for d in results_details if not d['is_member_actual']]
+        
+        member_mask_accuracy = sum(member_mask_accuracies) / len(member_mask_accuracies) if member_mask_accuracies else 0.0
+        non_member_mask_accuracy = sum(non_member_mask_accuracies) / len(non_member_mask_accuracies) if non_member_mask_accuracies else 0.0
+        
         logger.info(f"Evaluation: Acc={accuracy:.2f}, Pre={precision:.2f}, Rec={recall:.2f}, F1={f1:.2f}")
         logger.info(f"Avg Mask Accuracy: {avg_mask_accuracy:.2f}")
+        logger.info(f"Member Mask Accuracy: {member_mask_accuracy:.2f} (avg % masks correct for members)")
+        logger.info(f"Non-Member Mask Accuracy: {non_member_mask_accuracy:.2f} (avg % masks correct for non-members)")
         logger.info(f"Confusion Matrix: TP={true_positives}, TN={true_negatives}, FP={false_positives}, FN={false_negatives}")
         
         return {
@@ -340,6 +362,8 @@ class MBAFramework:
             'recall': recall,
             'f1': f1,
             'avg_mask_accuracy': avg_mask_accuracy,
+            'member_accuracy': member_mask_accuracy,
+            'non_member_accuracy': non_member_mask_accuracy,
             'confusion_matrix': {
                 'tp': true_positives, 'tn': true_negatives, 
                 'fp': false_positives, 'fn': false_negatives
