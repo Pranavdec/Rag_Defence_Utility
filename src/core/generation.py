@@ -80,7 +80,11 @@ class HuggingFaceGenerator:
             dict with 'answer', 'model'
         """
         # Build the prompt in chat format
-        context_str = "\n\n".join([f"Context {i+1}:\n{ctx}" for i, ctx in enumerate(contexts)])
+        if not contexts or len(contexts) == 0:
+            logger.warning("⚠️ No contexts provided to generator - answer will be based on LLM knowledge only")
+            context_str = "No relevant context was found in the knowledge base."
+        else:
+            context_str = "\n\n".join([f"Context {i+1}:\n{ctx}" for i, ctx in enumerate(contexts)])
         
         if system_prompt is None:
             system_prompt = (
@@ -190,7 +194,11 @@ class OllamaGenerator:
         import ollama
         
         # Build the prompt
-        context_str = "\n\n".join([f"Context {i+1}:\n{ctx}" for i, ctx in enumerate(contexts)])
+        if not contexts or len(contexts) == 0:
+            logger.warning("⚠️ No contexts provided to generator - answer will be based on LLM knowledge only")
+            context_str = "No relevant context was found in the knowledge base."
+        else:
+            context_str = "\n\n".join([f"Context {i+1}:\n{ctx}" for i, ctx in enumerate(contexts)])
         
         if system_prompt is None:
             system_prompt = (

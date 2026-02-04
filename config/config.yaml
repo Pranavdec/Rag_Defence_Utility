@@ -13,7 +13,7 @@ paths:
   results: data/results
   cache: data/raw
 data:
-  dataset: nq
+  dataset: pubmedqa
   ingestion_size: 700
   ingestion_seed: 42
   test_size: 50
@@ -47,7 +47,7 @@ defenses:
   candidate_multiplier: 3
 attack:
   mba:
-    enabled: false
+    enabled: true
     M: 5
     gamma: 0.35
     num_members: 30
@@ -58,14 +58,14 @@ attack:
     max_document_words: 200
     seed: 1235213
   poisoned_rag:
-    enabled: false
+    enabled: true
     poisoning_rate: 10
     num_targets: 50
     seed: 42
     target_start_index: 0
     diversity_level: true
 ado:
-  enabled: false
+  enabled: true
   user_id: test_user_001
   sentinel_model: llama3
   strategist_model: llama3

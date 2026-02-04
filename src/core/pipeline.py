@@ -385,6 +385,10 @@ class ModularRAG:
         
         contexts = [r["content"] for r in retrieved]
         
+        # Log warning if defenses filtered all documents
+        if len(contexts) == 0:
+            logger.warning(f"⚠️ NO CONTEXTS after defense filtering (originally had {len(self.vector_store.query(question, top_k=fetch_k, include_embeddings=False))} docs). Generation will proceed without context.")
+        
         # Defense Pre-Generation
         sys_p, user_p, mod_contexts = self.defense_manager.apply_pre_generation(
             system_prompt="", # Default empty

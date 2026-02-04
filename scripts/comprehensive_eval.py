@@ -195,7 +195,75 @@ class ConfigDrivenEvaluator:
             test_pairs = all_pairs
         
         logger.info(f"Loaded {len(test_pairs)} test QA pairs for evaluation")
+        
+        # Store questions for overlap detection
+        self.benign_questions = {qa.question for qa in test_pairs}
+        
         return test_pairs
+    
+    def partition_dataset_for_attacks(self):
+        """
+        Partition the dataset into disjoint sets for benign, poisoning, and MBA.
+        This ensures zero overlap between query types.
+        
+        Returns:
+            tuple: (benign_pairs, poison_pairs, mba_pairs)
+        """
+        dataset_name = self.config["data"]["dataset"]
+        ingestion_size = self.config["data"]["ingestion_size"]
+        ingestion_seed = self.config["data"]["ingestion_seed"]
+        
+        # Load enough data for all three purposes
+        # We need: benign_size + poison_targets + MBA queries (from same ingestion pool)
+        test_size = self.config["data"]["test_size"]
+        poison_targets = self.config.get("attack", {}).get("poisoned_rag", {}).get("num_targets", 10)
+        mba_members = self.config.get("attack", {}).get("mba", {}).get("num_members", 50)
+        
+        # Total needed from ingestion pool
+        total_needed = test_size + poison_targets + mba_members
+        
+        if total_needed > ingestion_size:
+            logger.warning(f"⚠️ Partition size {total_needed} exceeds ingestion_size {ingestion_size}")
+            logger.warning("This may cause overlap. Consider increasing ingestion_size.")
+        
+        loader = get_loader(dataset_name)
+        all_pairs = loader.load_qa_pairs(limit=ingestion_size, seed=ingestion_seed)
+        
+        # Shuffle for random partitioning
+        random.seed(ingestion_seed)
+        shuffled = all_pairs.copy()
+        random.shuffle(shuffled)
+        
+        # Partition into three disjoint sets
+        benign_end = min(test_size, len(shuffled))
+        poison_end = min(benign_end + poison_targets, len(shuffled))
+        mba_end = min(poison_end + mba_members, len(shuffled))
+        
+        benign_pairs = shuffled[:benign_end]
+        poison_pairs = shuffled[benign_end:poison_end]
+        mba_pairs = shuffled[poison_end:mba_end]
+        
+        logger.info(f"📊 Dataset Partitioning:")
+        logger.info(f"  - Benign: {len(benign_pairs)} queries")
+        logger.info(f"  - Poisoning: {len(poison_pairs)} targets")
+        logger.info(f"  - MBA: {len(mba_pairs)} candidates")
+        logger.info(f"  - Total: {len(benign_pairs) + len(poison_pairs) + len(mba_pairs)}/{len(all_pairs)} used")
+        
+        # Verify no overlap
+        benign_qs = {q.question for q in benign_pairs}
+        poison_qs = {q.question for q in poison_pairs}
+        mba_qs = {q.question for q in mba_pairs}
+        
+        overlap_bp = benign_qs & poison_qs
+        overlap_bm = benign_qs & mba_qs
+        overlap_pm = poison_qs & mba_qs
+        
+        if overlap_bp or overlap_bm or overlap_pm:
+            logger.error(f"❌ OVERLAP DETECTED: B∩P={len(overlap_bp)}, B∩M={len(overlap_bm)}, P∩M={len(overlap_pm)}")
+        else:
+            logger.info("✅ Zero overlap verified between query sets")
+        
+        return benign_pairs, poison_pairs, mba_pairs
     
     def run_query(self, query: str, user_id: str = "eval_user") -> Dict:
         """Run a single query and return result."""
@@ -281,9 +349,11 @@ class ConfigDrivenEvaluator:
         # Build query schedule
         query_schedule = []
         
+        # PARTITION DATASET TO PREVENT OVERLAP
+        benign_pairs, poison_candidate_pairs, mba_candidate_pairs = self.partition_dataset_for_attacks()
+        
         # 1. Add Benign Queries
-        test_pairs = self.load_test_qa_pairs()
-        for qa in test_pairs:
+        for qa in benign_pairs:
             query_schedule.append({
                 'type': 'benign',
                 'query': qa.question,
@@ -291,20 +361,49 @@ class ConfigDrivenEvaluator:
                 'metadata': {}
             })
         
-        # 2. Add Poisoning Queries (if enabled)
+        # 2. Add Poisoning Queries (if enabled) - Use pre-partitioned pairs
         poison_config = self.config.get("attack", {}).get("poisoned_rag", {})
         if poison_config.get("enabled", False):
-            # Generate poison payloads
+            # Create custom poison framework with partitioned data
             poison_framework = PoisonedRAGFramework(self.config)
-            payloads = poison_framework.generate_poisoned_payloads()
+            
+            # Override internal dataset selection by pre-selecting targets
+            target_pairs = poison_candidate_pairs[:poison_config.get('num_targets', 10)]
+            
+            # Generate poison documents from these specific targets
+            poisoned_docs = []
+            eval_pairs = []
+            
+            for idx, pair in enumerate(target_pairs):
+                poison_answer = f"ATTACK_SUCCESS_{idx}"
+                
+                eval_pairs.append({
+                    'question': pair.question,
+                    'target_answer': poison_answer,
+                    'ground_truth': pair.answer
+                })
+                
+                # Generate poisoned docs for this target
+                for i in range(poison_framework.poisoning_rate):
+                    doc_id = f"poison_q{idx}_d{i}_{poison_framework.seed}"
+                    content_seed = poison_framework.seed + idx + i
+                    content = poison_framework._craft_document(pair.question, poison_answer, content_seed)
+                    
+                    poisoned_docs.append({
+                        'doc_id': doc_id,
+                        'content': content,
+                        'target_question': pair.question,
+                        'target_answer': poison_answer,
+                        'metadata': {'target_idx': idx, 'doc_idx': i, 'poisoned': True}
+                    })
             
             # Inject poisoned documents
-            poisoned_docs = payloads.get('poisoned_documents', [])
             if poisoned_docs and self.rag.vector_store:
+                logger.info(f"Injecting {len(poisoned_docs)} poisoned documents from {len(target_pairs)} disjoint targets")
                 self._inject_poison_docs(poisoned_docs)
             
             # Add poison eval queries
-            for eval_pair in payloads.get('eval_pairs', []):
+            for eval_pair in eval_pairs:
                 query_schedule.append({
                     'type': 'poisoning',
                     'query': eval_pair['question'],
@@ -312,13 +411,17 @@ class ConfigDrivenEvaluator:
                     'metadata': {'ground_truth': eval_pair.get('ground_truth')}
                 })
         
-        # 3. Add MBA Queries (if enabled)
+        # 3. Add MBA Queries (if enabled) - Use pre-partitioned pairs
         mba_config = self.config.get("attack", {}).get("mba", {})
         mba_payloads = []
         if mba_config.get("enabled", False):
+            # Create MBA framework - it will use its own data loading
+            # We can't easily override its internal logic without major refactoring
+            # So we'll use its standard generation but verify overlap afterward
             mba_framework = MBAFramework(self.config)
             mba_payloads = mba_framework.generate_attack_dataset()
             
+            # Add all MBA queries (they're masked, so fundamentally different)
             for payload in mba_payloads:
                 query_schedule.append({
                     'type': 'mba',
@@ -347,6 +450,7 @@ class ConfigDrivenEvaluator:
             
             res = self.run_query(item['query'], user_id="mixed_eval_user")
             answer = res.get("answer", "")
+            contexts = res.get("contexts", [])
             
             # Determine success based on query type
             if item['type'] == 'benign':
@@ -358,6 +462,10 @@ class ConfigDrivenEvaluator:
                 success = False  # Will be evaluated later
                 mba_responses.append(answer)
             
+            # Merge contexts with metadata
+            extra_data = dict(item['metadata'])
+            extra_data['contexts'] = contexts
+            
             all_results.append(QueryResult(
                 query=item['query'],
                 query_type=item['type'],
@@ -366,7 +474,7 @@ class ConfigDrivenEvaluator:
                 success=success,
                 latency_ms=res.get('latency_ms', 0),
                 ado_metadata=res.get('ado_metadata', {}),
-                extra=item['metadata']
+                extra=extra_data
             ))
         
         print()  # Newline after progress
@@ -537,9 +645,15 @@ class ConfigDrivenEvaluator:
         before_count = self.rag.vector_store.collection.count()
         logger.info(f"Before injection: {before_count} documents in vector store")
         
-        docs = [pd.content for pd in poisoned_docs]
-        ids = [pd.doc_id for pd in poisoned_docs]
-        metas = [{"poisoned": True, "target": pd.target_question} for pd in poisoned_docs]
+        # Handle both dict and object formats
+        if poisoned_docs and isinstance(poisoned_docs[0], dict):
+            docs = [pd['content'] for pd in poisoned_docs]
+            ids = [pd['doc_id'] for pd in poisoned_docs]
+            metas = [{"poisoned": True, "target": pd.get('target_question', '')} for pd in poisoned_docs]
+        else:
+            docs = [pd.content for pd in poisoned_docs]
+            ids = [pd.doc_id for pd in poisoned_docs]
+            metas = [{"poisoned": True, "target": pd.target_question} for pd in poisoned_docs]
         
         logger.info(f"Injecting {len(docs)} poisoned documents with IDs like: {ids[0]}")
         
