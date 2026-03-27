@@ -13,7 +13,7 @@ paths:
   results: data/results
   cache: data/raw
 data:
-  dataset: pubmedqa
+  dataset: triviaqa
   ingestion_size: 700
   ingestion_seed: 42
   test_size: 50

@@ -100,7 +100,11 @@ class ModularRAG:
                 model_name=ado_config.get("sentinel_model", "llama3"),
                 use_ollama=True # Currently default
             )
-            self.strategist = Strategist(config=ado_config)
+            self.strategist = Strategist(
+                config=ado_config,
+                model_name=ado_config.get("strategist_model", "llama3"),
+                use_ollama=True
+            )
             
             # Default test user for batch runs
             self.default_user_id = ado_config.get("user_id", "test_user_001")

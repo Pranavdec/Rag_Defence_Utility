@@ -1,0 +1,13 @@
+dataset,dp,trustrag,av,poisoning,mba,ado,answer_relevancy,faithfulness,context_relevancy,context_recall,poison_asr,poison_success,poison_total,mba_member,mba_non_member
+nq,False,False,False,False,False,False,0.93,0.74,0.489,0.593,0.0,0,0,0.0,0.0
+nq,False,False,False,False,False,True,0.86,0.68,0.0,0.0,0.0,0,0,0.0,0.0
+nq,False,False,False,True,False,False,0.91,0.73,0.506,0.598,70.0,35,50,0.0,0.0
+nq,False,False,True,False,False,False,0.78,0.77,0.449,0.592,0.0,0,0,0.0,0.0
+nq,False,False,True,True,False,False,0.74,0.7,0.439,0.583,72.0,36,50,0.0,0.0
+nq,False,True,False,False,False,False,0.86,0.72,0.47,0.586,0.0,0,0,0.0,0.0
+nq,False,True,False,True,False,False,0.89,0.79,0.462,0.614,0.0,0,50,0.0,0.0
+nq,False,True,True,False,False,False,0.75,0.69,0.387,0.571,0.0,0,0,0.0,0.0
+nq,True,False,False,False,False,False,0.863,0.77,0.321,0.361,0.0,0,0,0.0,0.0
+nq,True,False,True,False,False,False,0.74,0.58,0.286,0.364,0.0,0,0,0.0,0.0
+nq,True,True,False,False,False,False,0.853,0.67,0.344,0.38,0.0,0,0,0.0,0.0
+nq,True,True,True,False,False,False,0.863,0.72,0.305,0.35,0.0,0,0,0.0,0.0
