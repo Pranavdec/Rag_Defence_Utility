@@ -11,6 +11,8 @@ mkdir -p ${LOG_DIR}
 
 CONFIG_FILE="config/config.yaml"
 BACKUP_CONFIG="config/config_backup.yaml"
+OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://api.openai.com}"
+OPENAI_API_PATH="${OPENAI_API_PATH:-/v1/chat/completions}"
 
 # Backup original config
 cp ${CONFIG_FILE} ${BACKUP_CONFIG}
@@ -98,8 +100,12 @@ attack:
 ado:
   enabled: ${ado_enabled}
   user_id: test_user_001
-  sentinel_model: gemma3
-  strategist_model: gemma3
+  llm_provider: openai_compatible
+  llm_base_url: ${OPENAI_BASE_URL}
+  llm_api_path: ${OPENAI_API_PATH}
+  llm_api_key: ${OPENAI_API_KEY}
+  sentinel_model: gpt-4o
+  strategist_model: gpt-4o
   strategist_mode: llm
   trust_score_decay: 0.05
 EOF
@@ -131,13 +137,13 @@ echo "" | tee -a ${LOG_DIR}/summary.log
 # 4. All datasets with both attacks + ADO
 # ==========================================
 
-# # # NQ - Both attacks + ADO
-# update_config "nq" 50 false true true false false false true
-# run_test "nq_12_both_attacks_ado" "NQ: Both attacks and ADO enabled"
+# # NQ - Both attacks + ADO
+update_config "nq" 50 false true true false false false true
+run_test "nq_12_both_attacks_ado" "NQ: Both attacks and ADO enabled"
 
-# # # PubMedQA - Both attacks + ADO
-# update_config "pubmedqa" 50 false true true false false false true
-# run_test "pubmedqa_11_both_attacks_ado" "PubMedQA: Both attacks and ADO enabled"
+# # PubMedQA - Both attacks + ADO
+update_config "pubmedqa" 50 false true true false false false true
+run_test "pubmedqa_11_both_attacks_ado" "PubMedQA: Both attacks and ADO enabled"
 
 # TriviaQA - Both attacks + ADO
 update_config "triviaqa" 50 false true true false false false true

@@ -34,7 +34,21 @@ logging.getLogger("chromadb").setLevel(logging.WARNING)
 def load_config(config_path: str = "config/config.yaml") -> dict:
     """Load configuration from YAML file."""
     with open(config_path, "r") as f:
-        return yaml.safe_load(f)
+        config = yaml.safe_load(f)
+
+    if config is None:
+        raise ValueError(f"Config file is empty: {config_path}")
+    if not isinstance(config, dict):
+        raise ValueError(f"Config root must be a mapping/object: {config_path}")
+
+    required_sections = ["system", "paths", "data", "retrieval"]
+    missing = [section for section in required_sections if section not in config]
+    if missing:
+        raise ValueError(
+            f"Config missing required top-level sections {missing}: {config_path}"
+        )
+
+    return config
 
 
 def get_loader(name: str) -> BaseLoader:
@@ -96,14 +110,29 @@ class ModularRAG:
             self.metrics_collector = MetricsCollector()
             
             ado_config = self.config.get("ado", {})
+            ado_provider = ado_config.get("llm_provider", "ollama")
+            ado_api_base_url = ado_config.get("llm_base_url")
+            ado_api_key = ado_config.get("llm_api_key") or os.getenv("OPENAI_API_KEY")
+            ado_api_path = ado_config.get("llm_api_path", "/v1/chat/completions")
+            ado_timeout_seconds = int(ado_config.get("llm_timeout_seconds", 30))
             self.sentinel = Sentinel(
                 model_name=ado_config.get("sentinel_model", "llama3"),
-                use_ollama=True # Currently default
+                use_ollama=ado_provider == "ollama",
+                provider=ado_provider,
+                api_base_url=ado_api_base_url,
+                api_key=ado_api_key,
+                api_path=ado_api_path,
+                timeout_seconds=ado_timeout_seconds,
             )
             self.strategist = Strategist(
                 config=ado_config,
                 model_name=ado_config.get("strategist_model", "llama3"),
-                use_ollama=True
+                use_ollama=ado_provider == "ollama",
+                provider=ado_provider,
+                api_base_url=ado_api_base_url,
+                api_key=ado_api_key,
+                api_path=ado_api_path,
+                timeout_seconds=ado_timeout_seconds,
             )
             
             # Default test user for batch runs

@@ -1,10 +1,51 @@
 import json
 import logging
 import requests
+import re
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, asdict
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_load_json(raw_text: str) -> Dict[str, Any]:
+    """Parse model output into JSON dict, tolerating fenced/mixed text outputs."""
+    if raw_text is None:
+        return {}
+
+    text = str(raw_text).strip()
+    if not text:
+        return {}
+
+    # Fast path: already valid JSON
+    try:
+        data = json.loads(text)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        pass
+
+    # Remove markdown fences if present
+    fence_match = re.search(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.IGNORECASE | re.DOTALL)
+    if fence_match:
+        fenced = fence_match.group(1).strip()
+        try:
+            data = json.loads(fenced)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            pass
+
+    # Extract the first JSON object substring
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        candidate = text[start:end + 1]
+        try:
+            data = json.loads(candidate)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            pass
+
+    return {}
 
 # =============================================================================
 # DATA STRUCTURES
@@ -83,10 +124,25 @@ class Sentinel:
     Output: RiskProfile with threat assessment
     """
     
-    def __init__(self, model_name: str = "llama3", use_ollama: bool = True, llm_client: Any = None):
+    def __init__(
+        self,
+        model_name: str = "llama3",
+        use_ollama: bool = True,
+        llm_client: Any = None,
+        provider: str = "ollama",
+        api_base_url: Optional[str] = None,
+        api_key: Optional[str] = None,
+        api_path: str = "/v1/chat/completions",
+        timeout_seconds: int = 30,
+    ):
         self.model_name = model_name
+        self.provider = (provider or "ollama").lower()
         self.use_ollama = use_ollama
         self.llm_client = llm_client
+        self.api_base_url = api_base_url.rstrip("/") if api_base_url else None
+        self.api_key = api_key
+        self.api_path = api_path if api_path.startswith("/") else f"/{api_path}"
+        self.timeout_seconds = timeout_seconds
 
     def analyze(self, 
                 query: str, 
@@ -104,12 +160,9 @@ class Sentinel:
         logger.info(f"Sentinel analyzing query: '{query[:80]}...'")
         
         try:
-            if self.use_ollama:
-                response_json = self._call_ollama(prompt)
-            else:
-                response_json = self._call_internal_llm(prompt)
+            response_json = self._call_llm(prompt)
             
-            data = json.loads(response_json)
+            data = _safe_load_json(response_json)
             logger.info(f"Sentinel response: {data}")
             risk_data = data.get("risk_assessment", {})
             persistence = data.get("persistence_update", {})
@@ -266,12 +319,9 @@ Trust Score: {trust_score:.2f}
         logger.info(f"Sentinel Phase 2: m_dis={post_metrics.get('m_dis', 0):.4f}, m_drp={post_metrics.get('m_drp', 0):.3f}")
         
         try:
-            if self.use_ollama:
-                response_json = self._call_ollama(prompt)
-            else:
-                response_json = self._call_internal_llm(prompt)
+            response_json = self._call_llm(prompt)
             
-            data = json.loads(response_json)
+            data = _safe_load_json(response_json)
             logger.info(f"Sentinel Phase 2 response: {data}")
             risk_data = data.get("risk_assessment", {})
             persistence = data.get("persistence_update", {})
@@ -291,7 +341,7 @@ Trust Score: {trust_score:.2f}
         url = "http://localhost:11434/api/generate"
         payload = {"model": self.model_name, "prompt": prompt, "stream": False, "format": "json"}
         try:
-            resp = requests.post(url, json=payload, timeout=30)
+            resp = requests.post(url, json=payload, timeout=self.timeout_seconds)
             if resp.status_code == 200:
                 return resp.json().get("response", "{}")
             logger.error(f"Ollama Error: {resp.text}")
@@ -299,6 +349,46 @@ Trust Score: {trust_score:.2f}
         except Exception as e:
             logger.error(f"Ollama Connection Failed: {e}")
             raise e
+
+    def _call_openai_compatible(self, prompt: str) -> str:
+        if not self.api_base_url:
+            logger.error("Sentinel OpenAI-compatible provider selected, but ado.llm_base_url is not set")
+            return "{}"
+
+        url = f"{self.api_base_url}{self.api_path}"
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        payload = {
+            "model": self.model_name,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0,
+        }
+
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=self.timeout_seconds)
+            if resp.status_code != 200:
+                logger.error(f"OpenAI-compatible Error ({resp.status_code}): {resp.text}")
+                return "{}"
+
+            data = resp.json()
+            return (
+                data.get("choices", [{}])[0]
+                .get("message", {})
+                .get("content", "{}")
+            )
+        except Exception as e:
+            logger.error(f"OpenAI-compatible connection failed: {e}")
+            return "{}"
+
+    def _call_llm(self, prompt: str) -> str:
+        provider = self.provider
+        if provider == "ollama":
+            return self._call_ollama(prompt)
+        if provider in {"openai", "openai_compatible", "openai-compatible"}:
+            return self._call_openai_compatible(prompt)
+        return self._call_internal_llm(prompt)
 
     def _call_internal_llm(self, prompt: str) -> str:
         if self.llm_client:
@@ -329,10 +419,25 @@ class Strategist:
     - Post-retrieval: Can enable TrustRAG, AV (post-retrieval/generation defenses)
     """
     
-    def __init__(self, config: Dict[str, Any], model_name: str = "llama3", use_ollama: bool = True):
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        model_name: str = "llama3",
+        use_ollama: bool = True,
+        provider: str = "ollama",
+        api_base_url: Optional[str] = None,
+        api_key: Optional[str] = None,
+        api_path: str = "/v1/chat/completions",
+        timeout_seconds: int = 30,
+    ):
         self.config = config
         self.model_name = model_name
+        self.provider = (provider or "ollama").lower()
         self.use_ollama = use_ollama
+        self.api_base_url = api_base_url.rstrip("/") if api_base_url else None
+        self.api_key = api_key
+        self.api_path = api_path if api_path.startswith("/") else f"/{api_path}"
+        self.timeout_seconds = timeout_seconds
         # Mode: 'deterministic' (default, fast) or 'llm' (slower but more nuanced)
         self.mode = config.get("strategist_mode", "deterministic")
         logger.info(f"Strategist initialized in '{self.mode}' mode")
@@ -362,12 +467,9 @@ class Strategist:
         # LLM MODE: Call LLM with deterministic overrides as safety net
         try:
             prompt = self._construct_prompt(risk_profile, stage)
-            if self.use_ollama:
-                response_json = self._call_ollama(prompt)
-            else:
-                response_json = "{}"
+            response_json = self._call_llm(prompt)
             
-            data = json.loads(response_json)
+            data = _safe_load_json(response_json)
             logger.info(f"Strategist LLM response: {data}")
             defense_plan = data.get("defense_plan", {})
             
@@ -736,13 +838,53 @@ IMPORTANT: Match defenses to specific threats:
         url = "http://localhost:11434/api/generate"
         payload = {"model": self.model_name, "prompt": prompt, "stream": False, "format": "json"}
         try:
-            resp = requests.post(url, json=payload, timeout=30)
+            resp = requests.post(url, json=payload, timeout=self.timeout_seconds)
             if resp.status_code == 200:
                 return resp.json().get("response", "{}")
             return "{}"
         except Exception as e:
             logger.error(f"Ollama error: {e}")
             return "{}"
+
+    def _call_openai_compatible(self, prompt: str) -> str:
+        if not self.api_base_url:
+            logger.error("Strategist OpenAI-compatible provider selected, but ado.llm_base_url is not set")
+            return "{}"
+
+        url = f"{self.api_base_url}{self.api_path}"
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        payload = {
+            "model": self.model_name,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0,
+        }
+
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=self.timeout_seconds)
+            if resp.status_code != 200:
+                logger.error(f"OpenAI-compatible Error ({resp.status_code}): {resp.text}")
+                return "{}"
+
+            data = resp.json()
+            return (
+                data.get("choices", [{}])[0]
+                .get("message", {})
+                .get("content", "{}")
+            )
+        except Exception as e:
+            logger.error(f"OpenAI-compatible error: {e}")
+            return "{}"
+
+    def _call_llm(self, prompt: str) -> str:
+        provider = self.provider
+        if provider == "ollama":
+            return self._call_ollama(prompt)
+        if provider in {"openai", "openai_compatible", "openai-compatible"}:
+            return self._call_openai_compatible(prompt)
+        return "{}"
 
 
 # =============================================================================

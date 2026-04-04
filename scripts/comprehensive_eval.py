@@ -828,9 +828,9 @@ class ConfigDrivenEvaluator:
         if metrics.poisoning_total > 0:
             print(f"  Poisoning ASR: {metrics.poisoning_asr:.1%} ({metrics.poisoning_success}/{metrics.poisoning_total})")
         if metrics.mba_total > 0:
-            print(f"  MBA Accuracy: {metrics.mba_accuracy:.1%}")
-            print(f"  MBA F1: {metrics.mba_f1:.3f}")
-            print(f"  MBA Avg Mask Accuracy: {metrics.mba_avg_mask_accuracy:.1%}")
+            # print(f"  MBA Accuracy: {metrics.mba_accuracy:.1%}")
+            # print(f"  MBA F1: {metrics.mba_f1:.3f}")
+            # print(f"  MBA Avg Mask Accuracy: {metrics.mba_avg_mask_accuracy:.1%}")
             if hasattr(metrics, 'mba_member_accuracy'):
                 print(f"  MBA Member Mask Accuracy: {metrics.mba_member_accuracy:.1%} (avg % masks correct)")
             if hasattr(metrics, 'mba_non_member_accuracy'):
