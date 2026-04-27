@@ -19,6 +19,7 @@ Usage:
 import os
 import sys
 import json
+import argparse
 import random
 import shutil
 import logging
@@ -150,11 +151,11 @@ class ConfigDrivenEvaluator:
     
     def clear_user_data(self):
         """Clear user session data for ADO (for clean trust scores)."""
-        user_data_path = "data/users"
+        user_data_path = self.config.get("paths", {}).get("user_data", "data/users")
         if os.path.exists(user_data_path):
             shutil.rmtree(user_data_path)
-            os.makedirs(user_data_path, exist_ok=True)
-            logger.info(f"Cleared user session data at: {user_data_path}")
+        os.makedirs(user_data_path, exist_ok=True)
+        logger.info(f"Cleared user session data at: {user_data_path}")
     
     def setup_rag(self) -> ModularRAG:
         """Initialize and return the RAG pipeline."""
@@ -877,7 +878,15 @@ class ConfigDrivenEvaluator:
 
 def main():
     """Entry point."""
-    evaluator = ConfigDrivenEvaluator()
+    parser = argparse.ArgumentParser(description="Run config-driven comprehensive RAG evaluation")
+    parser.add_argument(
+        "--config",
+        default="config/config.yaml",
+        help="Path to YAML config file (default: config/config.yaml)",
+    )
+    args = parser.parse_args()
+
+    evaluator = ConfigDrivenEvaluator(config_path=args.config)
     results = evaluator.run()
     
     if results:

@@ -34,6 +34,7 @@ class EvaluationResult:
 from ..data_loaders.nq_loader import NQLoader
 from ..data_loaders.trivia_loader import TriviaLoader
 from ..data_loaders.pubmed_loader import PubMedLoader
+from ..data_loaders.financebench_loader import FinanceBenchLoader
 
 class PoisonedRAGFramework:
     """
@@ -152,6 +153,8 @@ class PoisonedRAGFramework:
             return TriviaLoader(cache_dir=self.config.get('paths', {}).get('cache', 'data/raw'))
         elif dataset_name == 'pubmedqa':
             return PubMedLoader(cache_dir=self.config.get('paths', {}).get('cache', 'data/raw'))
+        elif dataset_name == 'financebench':
+            return FinanceBenchLoader(cache_dir=self.config.get('paths', {}).get('cache', 'data/raw'))
         else:
             raise ValueError(f"Unknown dataset: {dataset_name}")
 

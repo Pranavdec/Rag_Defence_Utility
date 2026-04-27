@@ -13,7 +13,7 @@ paths:
   results: data/results
   cache: data/raw
 data:
-  dataset: nq
+  dataset: triviaqa
   ingestion_size: 700
   ingestion_seed: 42
   test_size: 50
@@ -67,7 +67,7 @@ attack:
 ado:
   enabled: true
   user_id: test_user_001
-  sentinel_model: "gemma3:12b"
-  strategist_model: "gemma3:12b"
+  sentinel_model: llama3
+  strategist_model: llama3
   strategist_mode: llm
   trust_score_decay: 0.05

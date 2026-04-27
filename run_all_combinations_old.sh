@@ -45,7 +45,7 @@ paths:
   cache: data/raw
 data:
   dataset: ${dataset}
-  ingestion_size: 3000
+  ingestion_size: 700
   ingestion_seed: 42
   test_size: ${test_size}
   test_seed: 123
@@ -81,8 +81,8 @@ attack:
     enabled: ${mba_enabled}
     M: 5
     gamma: 0.35
-    num_members: 300
-    num_non_members: 200
+    num_members: 30
+    num_non_members: 20
     device: auto
     proxy_model: gpt2-xl
     enable_spelling_correction: false
@@ -91,7 +91,7 @@ attack:
   poisoned_rag:
     enabled: ${poisoned_enabled}
     poisoning_rate: 10
-    num_targets: 500
+    num_targets: 50
     seed: 42
     target_start_index: 0
     diversity_level: true
@@ -127,172 +127,174 @@ echo "Starting comprehensive test suite at $(date)" | tee ${LOG_DIR}/summary.log
 echo "Log directory: ${LOG_DIR}" | tee -a ${LOG_DIR}/summary.log
 echo "" | tee -a ${LOG_DIR}/summary.log
 
-# ==========================================
-# 1. Dataset: NQ
-# ==========================================
+# # ==========================================
+# # 1. Dataset: NQ
+# # ==========================================
 
-# NQ - All disabled
-update_config "nq" 1000 false false false false false false false
-run_test "nq_01_all_disabled" "NQ: All defenses, ADO, and attacks disabled"
+# # NQ - All disabled
+# update_config "nq" 50 false false false false false false false
+# run_test "nq_01_all_disabled" "NQ: All defenses, ADO, and attacks disabled"
 
-# NQ - Just poisoning
-update_config "nq" 1000 false false true false false false false
-run_test "nq_02_poisoning_only" "NQ: Just poisoning enabled"
+# # NQ - Just poisoning
+# update_config "nq" 50 false false true false false false false
+# run_test "nq_02_poisoning_only" "NQ: Just poisoning enabled"
 
-# NQ - Poisoning + TrustRAG
-update_config "nq" 1000 false false true false true false false
-run_test "nq_03_poisoning_trustrag" "NQ: Poisoning and TrustRAG enabled"
+# # NQ - Poisoning + TrustRAG
+# update_config "nq" 50 false false true false true false false
+# run_test "nq_03_poisoning_trustrag" "NQ: Poisoning and TrustRAG enabled"
 
-# NQ - Poisoning + Attention Filtering
-update_config "nq" 1000 false false true false false true false
-run_test "nq_04_poisoning_av" "NQ: Poisoning and Attention Filtering enabled"
+# # NQ - Poisoning + Attention Filtering
+# update_config "nq" 50 false false true false false true false
+# run_test "nq_04_poisoning_av" "NQ: Poisoning and Attention Filtering enabled"
 
-# NQ - All attacks disabled, defense combinations
-# Just DP
-update_config "nq" 1000 false false false true false false false
-run_test "nq_05_dp_only" "NQ: Just Differential Privacy enabled"
+# # NQ - All attacks disabled, defense combinations
+# # Just DP
+# update_config "nq" 50 false false false true false false false
+# run_test "nq_05_dp_only" "NQ: Just Differential Privacy enabled"
 
-# Just TrustRAG
-update_config "nq" 1000 false false false false true false false
-run_test "nq_06_trustrag_only" "NQ: Just TrustRAG enabled"
+# # Just TrustRAG
+# update_config "nq" 50 false false false false true false false
+# run_test "nq_06_trustrag_only" "NQ: Just TrustRAG enabled"
 
-# Just AV
-update_config "nq" 1000 false false false false false true false
-run_test "nq_07_av_only" "NQ: Just Attention Filtering enabled"
+# # Just AV
+# update_config "nq" 50 false false false false false true false
+# run_test "nq_07_av_only" "NQ: Just Attention Filtering enabled"
 
-# DP + TrustRAG
-update_config "nq" 1000 false false false true true false false
-run_test "nq_08_dp_trustrag" "NQ: DP and TrustRAG enabled"
+# # DP + TrustRAG
+# update_config "nq" 50 false false false true true false false
+# run_test "nq_08_dp_trustrag" "NQ: DP and TrustRAG enabled"
 
-# DP + AV
-update_config "nq" 1000 false false false true false true false
-run_test "nq_09_dp_av" "NQ: DP and Attention Filtering enabled"
+# # DP + AV
+# update_config "nq" 50 false false false true false true false
+# run_test "nq_09_dp_av" "NQ: DP and Attention Filtering enabled"
 
-# TrustRAG + AV
-update_config "nq" 1000 false false false false true true false
-run_test "nq_10_trustrag_av" "NQ: TrustRAG and Attention Filtering enabled"
+# # TrustRAG + AV
+# update_config "nq" 50 false false false false true true false
+# run_test "nq_10_trustrag_av" "NQ: TrustRAG and Attention Filtering enabled"
 
-# All defenses
-update_config "nq" 1000 false false false true true true false
-run_test "nq_11_all_defenses" "NQ: All defenses enabled"
+# # All defenses
+# update_config "nq" 50 false false false true true true false
+# run_test "nq_11_all_defenses" "NQ: All defenses enabled"
 
 # # ==========================================
 # # 2. Dataset: PubMedQA
 # # ==========================================
 
 # # PubMedQA - All disabled
-# update_config "pubmedqa" 1000 false false false false false false false
+# update_config "pubmedqa" 50 false false false false false false false
 # run_test "pubmedqa_01_all_disabled" "PubMedQA: All defenses, ADO, and attacks disabled"
 
 # # PubMedQA - Just MBA
-# update_config "pubmedqa" 1000 false true false false false false false
+# update_config "pubmedqa" 50 false true false false false false false
 # run_test "pubmedqa_02_mba_only" "PubMedQA: Just MBA enabled"
 
 # # PubMedQA - MBA + DP
-# update_config "pubmedqa" 1000 false true false true false false false
+# update_config "pubmedqa" 50 false true false true false false false
 # run_test "pubmedqa_03_mba_dp" "PubMedQA: MBA and DP enabled"
 
 # # PubMedQA - All attacks disabled, defense combinations
 # # Just DP
-# update_config "pubmedqa" 1000 false false false true false false false
+# update_config "pubmedqa" 50 false false false true false false false
 # run_test "pubmedqa_04_dp_only" "PubMedQA: Just Differential Privacy enabled"
 
 # # Just TrustRAG
-# update_config "pubmedqa" 1000 false false false false true false false
+# update_config "pubmedqa" 50 false false false false true false false
 # run_test "pubmedqa_05_trustrag_only" "PubMedQA: Just TrustRAG enabled"
 
 # # Just AV
-# update_config "pubmedqa" 1000 false false false false false true false
+# update_config "pubmedqa" 50 false false false false false true false
 # run_test "pubmedqa_06_av_only" "PubMedQA: Just Attention Filtering enabled"
 
 # # DP + TrustRAG
-# update_config "pubmedqa" 1000 false false false true true false false
+# update_config "pubmedqa" 50 false false false true true false false
 # run_test "pubmedqa_07_dp_trustrag" "PubMedQA: DP and TrustRAG enabled"
 
 # # DP + AV
-# update_config "pubmedqa" 1000 false false false true false true false
+# update_config "pubmedqa" 50 false false false true false true false
 # run_test "pubmedqa_08_dp_av" "PubMedQA: DP and Attention Filtering enabled"
 
 # # TrustRAG + AV
-# update_config "pubmedqa" 1000 false false false false true true false
+# update_config "pubmedqa" 50 false false false false true true false
 # run_test "pubmedqa_09_trustrag_av" "PubMedQA: TrustRAG and Attention Filtering enabled"
 
 # # All defenses
-# update_config "pubmedqa" 1000 false false false true true true false
+# update_config "pubmedqa" 50 false false false true true true false
 # run_test "pubmedqa_10_all_defenses" "PubMedQA: All defenses enabled"
+
+
 
 # # ==========================================
 # # 3. Dataset: TriviaQA
 # # ==========================================
 
 # # TriviaQA - All disabled
-# update_config "triviaqa" 1000 false false false false false false false
+# update_config "triviaqa" 50 false false false false false false false
 # run_test "triviaqa_01_all_disabled" "TriviaQA: All defenses, ADO, and attacks disabled"
 
 # # TriviaQA - Just MBA
-# update_config "triviaqa" 1000 false true false false false false false
+# update_config "triviaqa" 50 false true false false false false false
 # run_test "triviaqa_02_mba_only" "TriviaQA: Just MBA enabled"
 
 # # TriviaQA - MBA + DP
-# update_config "triviaqa" 1000 false true false true false false false
+# update_config "triviaqa" 50 false true false true false false false
 # run_test "triviaqa_03_mba_dp" "TriviaQA: MBA and DP enabled"
 
 # # TriviaQA - All attacks disabled, defense combinations
 # # Just DP
-# update_config "triviaqa" 1000 false false false true false false false
+# update_config "triviaqa" 50 false false false true false false false
 # run_test "triviaqa_04_dp_only" "TriviaQA: Just Differential Privacy enabled"
 
 # # Just TrustRAG
-# update_config "triviaqa" 1000 false false false false true false false
+# update_config "triviaqa" 50 false false false false true false false
 # run_test "triviaqa_05_trustrag_only" "TriviaQA: Just TrustRAG enabled"
 
 # # Just AV
-# update_config "triviaqa" 1000 false false false false false true false
+# update_config "triviaqa" 50 false false false false false true false
 # run_test "triviaqa_06_av_only" "TriviaQA: Just Attention Filtering enabled"
 
 # # DP + TrustRAG
-# update_config "triviaqa" 1000 false false false true true false false
+# update_config "triviaqa" 50 false false false true true false false
 # run_test "triviaqa_07_dp_trustrag" "TriviaQA: DP and TrustRAG enabled"
 
 # # DP + AV
-# update_config "triviaqa" 1000 false false false true false true false
+# update_config "triviaqa" 50 false false false true false true false
 # run_test "triviaqa_08_dp_av" "TriviaQA: DP and Attention Filtering enabled"
 
 # # TrustRAG + AV
-# update_config "triviaqa" 1000 false false false false true true false
+# update_config "triviaqa" 50 false false false false true true false
 # run_test "triviaqa_09_trustrag_av" "TriviaQA: TrustRAG and Attention Filtering enabled"
 
 # # All defenses
-# update_config "triviaqa" 1000 false false false true true true false
+# update_config "triviaqa" 50 false false false true true true false
 # run_test "triviaqa_10_all_defenses" "TriviaQA: All defenses enabled"
 
 # # TriviaQA - Just poisoning
-# update_config "triviaqa" 1000 false false true false false false false
+# update_config "triviaqa" 50 false false true false false false false
 # run_test "triviaqa_11_poisoning_only" "TriviaQA: Just poisoning enabled"
 
 # # TriviaQA - Poisoning + TrustRAG
-# update_config "triviaqa" 1000 false false true false true false false
+# update_config "triviaqa" 50 false false true false true false false
 # run_test "triviaqa_12_poisoning_trustrag" "TriviaQA: Poisoning and TrustRAG enabled"
 
 # # TriviaQA - Poisoning + AV
-# update_config "triviaqa" 1000 false false true false false true false
+# update_config "triviaqa" 50 false false true false false true false
 # run_test "triviaqa_13_poisoning_av" "TriviaQA: Poisoning and Attention Filtering enabled"
 
-# # ==========================================
-# # 4. All datasets with both attacks + ADO
-# # ==========================================
+# ==========================================
+# 4. All datasets with both attacks + ADO
+# ==========================================
 
 # NQ - Both attacks + ADO
-update_config "nq" 1000 false true true false false false true
+update_config "nq" 50 false true true false false false true
 run_test "nq_12_both_attacks_ado" "NQ: Both attacks and ADO enabled"
 
-# # PubMedQA - Both attacks + ADO
-# update_config "pubmedqa" 1000 false true true false false false true
-# run_test "pubmedqa_11_both_attacks_ado" "PubMedQA: Both attacks and ADO enabled"
+# PubMedQA - Both attacks + ADO
+update_config "pubmedqa" 50 false true true false false false true
+run_test "pubmedqa_11_both_attacks_ado" "PubMedQA: Both attacks and ADO enabled"
 
-# # TriviaQA - Both attacks + ADO
-# update_config "triviaqa" 1000 false true true false false false true
-# run_test "triviaqa_14_both_attacks_ado" "TriviaQA: Both attacks and ADO enabled"
+# TriviaQA - Both attacks + ADO
+update_config "triviaqa" 50 false true true false false false true
+run_test "triviaqa_14_both_attacks_ado" "TriviaQA: Both attacks and ADO enabled"
 
 # ==========================================
 # Restore original config and finish

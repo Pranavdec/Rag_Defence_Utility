@@ -6,7 +6,7 @@ A modular, reproducible RAG (Retrieval Augmented Generation) pipeline designed f
 *   **Smart Indexing**: Indexes only the "gold passages" relevant to test questions, enabling fast and valid local testing.
 *   **Fully Local**: uses `sentence-transformers` for embeddings and `Ollama` (Llama 3) for generation and evaluation.
 *   **Reproducible**: Seeded random sampling (`ingestion_seed`, `test_seed`) ensures consistent train/test splits.
-*   **Multi-Dataset**: Native support for Natural Questions (NQ), PubMedQA, and TriviaQA.
+*   **Multi-Dataset**: Native support for Natural Questions (NQ), PubMedQA, TriviaQA, and FinanceBench.
 
 ## 🔗 Prerequistes
 *   Python 3.10+
@@ -41,39 +41,14 @@ A modular, reproducible RAG (Retrieval Augmented Generation) pipeline designed f
 
 ## 🚀 Usage
 
-The pipeline follows a 3-step workflow: **Ingest → Run → Evaluate**.
-
-### Step 1: Ingest Data
-Downloads datasets (if needed), indexes gold passages, and saves QA pairs.
-*Auto-clears previous data to ensure a clean state.*
+The default entrypoint is config-driven and performs ingestion plus evaluation:
 
 ```bash
-# Ingest all datasets (NQ, PubMedQA, TriviaQA)
-python scripts/ingest_data.py
-
-# Or specific dataset
-python scripts/ingest_data.py nq
+python scripts/comprehensive_eval.py --config config/config.yaml
 ```
 
-### Step 2: Run Inference
-Runs retrieval and generation on the test set. Does **not** re-ingest.
-
-```bash
-python main.py run nq
-python main.py run pubmedqa
-python main.py run triviaqa
-```
-*Results saved to: `data/results/run_<dataset>_<timestamp>.json`*
-
-### Step 3: Evaluate
-Runs metrics (Faithfulness, Answer Correctness, Latency) using RAGAS with a local Ollama judge.
-
-```bash
-python main.py evaluate data/results/run_nq_20260103_xxxx.json
-```
-*Outputs:*
-*   JSON Report: `data/metrics/eval_nq_<timestamp>.json`
-*   CSV Table: `data/metrics/eval_nq_<timestamp>_metrics.csv`
+To switch datasets, set `data.dataset` in `config/config.yaml` to one of:
+`nq`, `pubmedqa`, `triviaqa`, `financebench`.
 
 ## 📊 Metrics
 *   **Latency**: End-to-end generation time (ms).

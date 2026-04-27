@@ -970,7 +970,7 @@ class ComprehensiveEvaluator:
     def run_full_evaluation(self, datasets: List[str] = None, 
                             num_benign: int = 30, num_poison: int = 15, num_mba: int = 10):
         """Run complete evaluation across all datasets and configurations."""
-        datasets = datasets or ["nq", "pubmedqa", "triviaqa"]
+        datasets = datasets or ["nq", "pubmedqa", "triviaqa", "financebench"]
         
         print("\n" + "=" * 70)
         print("COMPREHENSIVE FULL EVALUATION")
@@ -1075,8 +1075,8 @@ Examples:
   # Full evaluation on all datasets
   python scripts/comprehensive_eval.py --mode full
   
-  # Utility sweep across defense combinations
-  python scripts/comprehensive_eval.py --mode utility --datasets nq,pubmedqa
+    # Utility sweep across defense combinations
+    python scripts/comprehensive_eval.py --mode utility --datasets nq,pubmedqa,financebench
   
   # Attack evaluation
   python scripts/comprehensive_eval.py --mode attack --attack-type poisoning
@@ -1090,7 +1090,7 @@ Examples:
                         choices=["quick", "full", "utility", "attack", "mixed"],
                         help="Evaluation mode")
     parser.add_argument("--dataset", type=str, default="nq",
-                        choices=["nq", "pubmedqa", "triviaqa"],
+                        choices=["nq", "pubmedqa", "triviaqa", "financebench"],
                         help="Single dataset to evaluate")
     parser.add_argument("--datasets", type=str, default=None,
                         help="Comma-separated datasets (e.g., nq,pubmedqa)")
@@ -1145,7 +1145,7 @@ Examples:
     elif args.mode == "full":
         print("Running FULL evaluation...")
         evaluator.run_full_evaluation(
-            datasets=["nq", "pubmedqa", "triviaqa"],
+            datasets=["nq", "pubmedqa", "triviaqa", "financebench"],
             num_benign=args.num_benign,
             num_poison=args.num_poison,
             num_mba=args.num_mba

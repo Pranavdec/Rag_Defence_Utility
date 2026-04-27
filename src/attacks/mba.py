@@ -112,6 +112,7 @@ class MBAFramework:
         from ..data_loaders.nq_loader import NQLoader
         from ..data_loaders.trivia_loader import TriviaLoader
         from ..data_loaders.pubmed_loader import PubMedLoader
+        from ..data_loaders.financebench_loader import FinanceBenchLoader
 
         # Loader Factory
         if self.dataset_name == 'nq':
@@ -120,6 +121,8 @@ class MBAFramework:
             loader = TriviaLoader(cache_dir=self.config.get('paths', {}).get('cache', 'data/raw'))
         elif self.dataset_name == 'pubmedqa':
             loader = PubMedLoader(cache_dir=self.config.get('paths', {}).get('cache', 'data/raw'))
+        elif self.dataset_name == 'financebench':
+            loader = FinanceBenchLoader(cache_dir=self.config.get('paths', {}).get('cache', 'data/raw'))
         else:
             raise ValueError(f"Unknown dataset: {self.dataset_name}")
             

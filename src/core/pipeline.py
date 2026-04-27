@@ -12,6 +12,7 @@ import yaml
 import logging
 
 from ..data_loaders.base_loader import BaseLoader, QAPair
+from ..data_loaders.financebench_loader import FinanceBenchLoader
 from ..data_loaders.nq_loader import NQLoader
 from ..data_loaders.pubmed_loader import PubMedLoader
 from ..data_loaders.trivia_loader import TriviaLoader
@@ -54,6 +55,7 @@ def load_config(config_path: str = "config/config.yaml") -> dict:
 def get_loader(name: str) -> BaseLoader:
     """Factory function to get loader by name."""
     loaders = {
+        "financebench": FinanceBenchLoader,
         "nq": NQLoader,
         "pubmedqa": PubMedLoader,
         "triviaqa": TriviaLoader,
@@ -106,7 +108,8 @@ class ModularRAG:
         # Initialize ADO Components
         if self.ado_enabled:
             logger.info("Initializing ADO Components...")
-            self.trust_manager = UserTrustManager()
+            user_data_path = self.config.get("paths", {}).get("user_data", "data/users")
+            self.trust_manager = UserTrustManager(storage_dir=user_data_path)
             self.metrics_collector = MetricsCollector()
             
             ado_config = self.config.get("ado", {})
