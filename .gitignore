@@ -15,7 +15,7 @@ venv/
 
 # Project Data (Local)
 data/raw/
-data/chroma_db/
+data/chroma_db*/
 data/qa_pairs/
 data/results/
 data/metrics/
@@ -23,6 +23,7 @@ data/metrics*/
 data/results*/
 data/users*/
 old_logs/
+
 
 # Logs
 *.log
