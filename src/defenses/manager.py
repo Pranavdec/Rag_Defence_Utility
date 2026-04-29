@@ -2,15 +2,26 @@ import logging
 from typing import List, Dict, Any, Tuple, Optional
 from .base import BaseDefense
 from .dp_rag import DifferentialPrivacyDefense
+from .pad import PADDefense
 from .trustrag import TrustRAGDefense
-from .av_defense import AttentionFilteringDefense
 
-# Registry of available defenses
+# Registry of available defenses (canonical keys)
 DEFENSE_REGISTRY = {
     "differential_privacy": DifferentialPrivacyDefense,
     "trustrag": TrustRAGDefense,
-    "attention_filtering": AttentionFilteringDefense,
+    "privacy_aware_decoding": PADDefense,
 }
+
+# YAML alias -> canonical registry key
+DEFENSE_ALIASES = {
+    "pad": "privacy_aware_decoding",
+}
+
+
+def resolve_defense_registry_key(name: str) -> str:
+    """Map config defense name (e.g. pad) to canonical DEFENSE_REGISTRY key."""
+    return DEFENSE_ALIASES.get(name, name)
+
 
 logger = logging.getLogger(__name__)
 
@@ -55,13 +66,17 @@ class DefenseManager:
         """
         logger.info("[Manager] ADO mode: Pre-initializing all defenses...")
         
-        # Build config map by name
-        config_map = {d.get("name"): d for d in config if d.get("name")}
-        
+        # Build config map by canonical registry key (resolve aliases e.g. pad)
+        config_map = {}
+        for d in config:
+            raw = d.get("name")
+            if raw:
+                config_map[resolve_defense_registry_key(raw)] = d
+
         for name, defense_class in DEFENSE_REGISTRY.items():
             # Get config for this defense, or use defaults
-            defense_conf = config_map.get(name, {"name": name})
-            defense_conf["name"] = name  # Ensure name is set
+            defense_conf = dict(config_map.get(name, {"name": name}))
+            defense_conf["name"] = name  # Ensure canonical name for the instance
             
             try:
                 defense_instance = defense_class(defense_conf)
@@ -94,15 +109,18 @@ class DefenseManager:
             if not name:
                 logger.warning("Defense configuration missing 'name'. Config: %s", defense_conf)
                 continue
-                
-            defense_class = DEFENSE_REGISTRY.get(name)
+
+            registry_key = resolve_defense_registry_key(name)
+            defense_class = DEFENSE_REGISTRY.get(registry_key)
             if defense_class:
                 if defense_conf.get("enabled", True):
                     try:
-                        defense_instance = defense_class(defense_conf)
-                        self.all_defenses[name] = defense_instance
+                        merged = dict(defense_conf)
+                        merged["name"] = registry_key
+                        defense_instance = defense_class(merged)
+                        self.all_defenses[registry_key] = defense_instance
                         self.active_defenses.append(defense_instance)
-                        logger.info(f"[Manager] Defense initialized: {name}")
+                        logger.info(f"[Manager] Defense initialized: {registry_key}")
                     except Exception as e:
                         logger.error(f"[Manager] Failed to initialize defense {name}: {e}")
             else:
@@ -149,7 +167,8 @@ class DefenseManager:
         new_active = []
         
         for name, plan_settings in defense_plan.items():
-            if name not in DEFENSE_REGISTRY:
+            registry_key = resolve_defense_registry_key(name)
+            if registry_key not in DEFENSE_REGISTRY:
                 continue
             
             # Check enabled status
@@ -157,9 +176,9 @@ class DefenseManager:
                 continue
             
             # Get from pool (should exist if ADO mode was used)
-            if name in self.all_defenses:
-                defense = self.all_defenses[name]
-                logger.info(f"[Manager] Activating defense from pool: {name}")
+            if registry_key in self.all_defenses:
+                defense = self.all_defenses[registry_key]
+                logger.info(f"[Manager] Activating defense from pool: {registry_key}")
                 
                 # Update parameters
                 self._update_defense_params(defense, plan_settings)
@@ -167,11 +186,11 @@ class DefenseManager:
                 
             else:
                 # Fallback: create new instance (shouldn't happen in ADO mode)
-                logger.warning(f"[Manager] Defense {name} not in pool, creating new instance")
-                defense_conf = {"name": name}
+                logger.warning(f"[Manager] Defense {registry_key} not in pool, creating new instance")
+                defense_conf = {"name": registry_key}
                 defense_conf.update(plan_settings)
                 
-                defense_class = DEFENSE_REGISTRY.get(name)
+                defense_class = DEFENSE_REGISTRY.get(registry_key)
                 try:
                     defense_instance = defense_class(defense_conf)
                     self.all_defenses[name] = defense_instance
@@ -192,11 +211,12 @@ class DefenseManager:
         Returns:
             True if activated, False if not found or already active
         """
-        if name not in self.all_defenses:
+        registry_key = resolve_defense_registry_key(name)
+        if registry_key not in self.all_defenses:
             logger.warning(f"[Manager] Cannot activate unknown defense: {name}")
             return False
         
-        defense = self.all_defenses[name]
+        defense = self.all_defenses[registry_key]
         if defense in self.active_defenses:
             logger.debug(f"[Manager] Defense already active: {name}")
             return True
@@ -213,11 +233,12 @@ class DefenseManager:
         Returns:
             True if deactivated, False if not found or not active
         """
-        if name not in self.all_defenses:
+        registry_key = resolve_defense_registry_key(name)
+        if registry_key not in self.all_defenses:
             logger.warning(f"[Manager] Cannot deactivate unknown defense: {name}")
             return False
         
-        defense = self.all_defenses[name]
+        defense = self.all_defenses[registry_key]
         if defense not in self.active_defenses:
             logger.debug(f"[Manager] Defense not active: {name}")
             return True
@@ -229,16 +250,17 @@ class DefenseManager:
 
     def is_defense_active(self, name: str) -> bool:
         """Check if a defense is currently active."""
-        if name not in self.all_defenses:
+        registry_key = resolve_defense_registry_key(name)
+        if registry_key not in self.all_defenses:
             return False
-        return self.all_defenses[name] in self.active_defenses
+        return self.all_defenses[registry_key] in self.active_defenses
 
     def get_defense_status(self) -> Dict[str, Any]:
         """Get current status of all defenses."""
         active_names = [d.name for d in self.active_defenses]
         return {
             "active": active_names,
-            "inactive": [n for n in self.all_defenses if n not in active_names],
+            "inactive": [n for n in self.all_defenses if self.all_defenses[n] not in self.active_defenses],
             "needs_embeddings": self.needs_embeddings,
             "target_top_k": self.target_top_k
         }
@@ -333,25 +355,31 @@ class DefenseManager:
             
         return current_response
 
+    def is_privacy_aware_decoding_active(self) -> bool:
+        """True if PAD is active (requires Hugging Face generation with logits_processor)."""
+        return any(isinstance(d, PADDefense) for d in self.active_defenses)
+
+    def get_hf_extra_generation_kwargs(self) -> Dict[str, Any]:
+        """
+        Extra keyword arguments for Hugging Face ``model.generate`` (e.g. logits processors).
+
+        PAD registers adaptive/static noise logits processors here. Empty dict if PAD off.
+        """
+        processors = []
+        for defense in self.active_defenses:
+            if isinstance(defense, PADDefense):
+                processors.append(defense.build_logits_processor())
+        if not processors:
+            return {}
+        return {"logits_processor": processors}
+
     def get_shared_av_model(self):
         """
-        Get the Llama model instance from AttentionFilteringDefense if available.
-        This allows sharing the model with the generator to save GPU memory.
-        
-        Returns:
-            Llama model instance or None
+        Backward-compatibility hook.
+
+        The attention filtering (AV) defense has been removed from the codebase,
+        so there is no shared AV model to return.
         """
-        # Check in pool first (for ADO mode)
-        if "attention_filtering" in self.all_defenses:
-            defense = self.all_defenses["attention_filtering"]
-            if isinstance(defense, AttentionFilteringDefense):
-                return defense.llm
-        
-        # Fallback: check active defenses
-        for defense in self.active_defenses:
-            if isinstance(defense, AttentionFilteringDefense):
-                return defense.llm
-        
         return None
 
     # Backward compatibility properties

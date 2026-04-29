@@ -153,14 +153,6 @@ class ModularRAG:
         if initialize_generator:
             self.generator = create_generator(self.config, defense_manager=self.defense_manager)
         
-        # If using HuggingFace generator with ADO, share the model with AV defense
-        # This prevents OOM when ADO dynamically enables AV defense
-        if hasattr(self.generator, 'llm') and self.generator.llm is not None:
-            from ..defenses.av_defense import AttentionFilteringDefense
-            AttentionFilteringDefense._shared_model = self.generator.llm
-            AttentionFilteringDefense._shared_model_path = getattr(self.generator, 'model_path', None)
-            logger.info("Pre-registered generator model for potential AV defense sharing")
-        
         # Vector store will be initialized per dataset
         self.vector_store: Optional[VectorStore] = None
         self.current_dataset: Optional[str] = None
@@ -410,21 +402,19 @@ class ModularRAG:
             # Check if post-retrieval defenses were activated
             initial_plan = ado_metadata.get("initial_defense_plan", {})
             trustrag_activated = updated_plan.get("trustrag", {}).get("enabled") and not initial_plan.get("trustrag", {}).get("enabled")
-            av_activated = updated_plan.get("attention_filtering", {}).get("enabled") and not initial_plan.get("attention_filtering", {}).get("enabled")
             
-            if trustrag_activated or av_activated:
-                logger.warning(f"ADO POST-RETRIEVAL DEFENSE ACTIVATED: TrustRAG={trustrag_activated}, AV={av_activated} | Reason: {post_analysis.reasoning_trace}")
+            if trustrag_activated:
+                logger.warning(f"ADO POST-RETRIEVAL DEFENSE ACTIVATED: TrustRAG={trustrag_activated} | Reason: {post_analysis.reasoning_trace}")
                 self.defense_manager.set_dynamic_config(updated_plan)
                 ado_metadata["defense_plan"] = updated_plan
                 ado_metadata["post_retrieval_defense_activated"] = True
                 ado_metadata["activated_defenses"] = {
                     "trustrag": trustrag_activated,
-                    "av": av_activated,
                     "reason": post_analysis.reasoning_trace
                 }
 
         
-        # Defense Post-Retrieval (TrustRAG/AV now enabled if anomalies detected)
+        # Defense Post-Retrieval (TrustRAG enabled if anomalies detected)
         retrieved = self.defense_manager.apply_post_retrieval(retrieved, question)
         
         contexts = [r["content"] for r in retrieved]

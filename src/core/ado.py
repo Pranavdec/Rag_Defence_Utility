@@ -65,7 +65,6 @@ class DefensePlan:
     """Output from Strategist - describes which defenses to enable."""
     differential_privacy: Dict[str, Any]
     trustrag: Dict[str, Any]
-    attention_filtering: Dict[str, Any]
     reasoning: str
 
 
@@ -94,16 +93,6 @@ defense_registry:
         type: "float"
         range: [0.5, 0.99]
         description: "Higher value = Stricter Filtering. Use 0.90+ for high threat."
-
-  - name: "attention_filtering"
-    type: "generation_layer"
-    description: "Checks generation stability to prevent Content Leakage and Jailbreak."
-    when_to_use: "High jailbreak threat or content_leakage risk detected"
-    parameters:
-      max_corruptions:
-        type: "int"
-        range: [1, 10]
-        description: "Higher value = More checks but Higher Latency."
 """
 
 
@@ -416,7 +405,7 @@ class Strategist:
     
     Two-stage operation:
     - Pre-retrieval: Can enable DP (retrieval layer defense)
-    - Post-retrieval: Can enable TrustRAG, AV (post-retrieval/generation defenses)
+    - Post-retrieval: Can enable TrustRAG (post-retrieval defense)
     """
     
     def __init__(
@@ -461,7 +450,7 @@ class Strategist:
             plan = self._deterministic_plan(risk_profile, stage, metrics)
             logger.info(f"Strategist deterministic plan: DP={plan['differential_privacy']['enabled']}, "
                        f"epsilon={plan['differential_privacy']['epsilon']}, "
-                       f"TrustRAG={plan['trustrag']['enabled']}, AV={plan['attention_filtering']['enabled']}")
+                       f"TrustRAG={plan['trustrag']['enabled']}")
             return plan
         
         # LLM MODE: Call LLM with deterministic overrides as safety net
@@ -499,15 +488,11 @@ You can ONLY enable differential_privacy at this stage.
         else:  # post_retrieval
             available_defenses = """
 AVAILABLE DEFENSES (POST-RETRIEVAL STAGE):
-You can enable trustrag and attention_filtering at this stage.
+You can enable trustrag at this stage.
 
 1. trustrag: Filters suspicious/poisoned documents. 
    USE FOR: data_poisoning threat > 0.4 OR high embedding dispersion detected
    - similarity_threshold: 0.88 (normal) to 0.95 (strict)
-   
-2. attention_filtering: Verifies generation safety. 
-   USE FOR: jailbreak > 0.4 OR content_leakage > 0.4
-   - max_corruptions: 3 (default)
 """
         
         return f"""You are the STRATEGIST, a defense commander for a RAG system.
@@ -545,7 +530,6 @@ EPSILON GUIDELINES (for differential_privacy):
 IMPORTANT: Match defenses to specific threats:
 - membership_inference → differential_privacy
 - data_poisoning → trustrag  
-- jailbreak/content_leakage → attention_filtering
 
 === OUTPUT FORMAT (Strict JSON, no markdown) ===
 
@@ -558,10 +542,6 @@ IMPORTANT: Match defenses to specific threats:
     "trustrag": {{
       "enabled": true | false,
       "similarity_threshold": 0.88-0.95
-    }},
-    "attention_filtering": {{
-      "enabled": true | false,
-      "max_corruptions": 3
     }},
     "reasoning": "Explain why you chose these settings based on threat scores AND trust score"
   }}
@@ -599,12 +579,6 @@ IMPORTANT: Match defenses to specific threats:
                 logger.warning("OVERRIDE: Forcing TrustRAG on due to high M_DIS or data_poisoning")
                 plan["trustrag"]["enabled"] = True
                 plan["trustrag"]["similarity_threshold"] = 0.90
-        
-        # M_CMP > 0.6 (obfuscation) OR jailbreak > 0.5 => Force Attention Filtering
-        if metrics.get("m_cmp", 0) > 0.6 or threats.get("jailbreak", 0) > 0.5:
-            if not plan["attention_filtering"]["enabled"]:
-                logger.warning("OVERRIDE: Forcing AV on due to high M_CMP or jailbreak")
-                plan["attention_filtering"]["enabled"] = True
         
         # M_INT > 0.7 (automated probing) => Force DP (bot protection)
         if metrics.get("m_int", 0) > 0.7:
@@ -646,7 +620,6 @@ IMPORTANT: Match defenses to specific threats:
         """Build structured plan from LLM response."""
         dp = defense_plan.get("differential_privacy", {})
         tr = defense_plan.get("trustrag", {})
-        av = defense_plan.get("attention_filtering", {})
         
         # Helper to safely convert to float (LLM might return strings like "0.88-0.95")
         def safe_float(val, default):
@@ -674,14 +647,6 @@ IMPORTANT: Match defenses to specific threats:
                 "enabled": tr.get("enabled", False),
                 "similarity_threshold": safe_float(tr.get("similarity_threshold"), 0.88),
                 "rouge_threshold": 0.25,
-                "candidate_multiplier": 3
-            },
-            "attention_filtering": {
-                "enabled": av.get("enabled", False),
-                "model_path": self.config.get("av_model_path", "meta-llama/Llama-3.1-8B-Instruct"),
-                "top_tokens": 100,
-                "max_corruptions": int(safe_float(av.get("max_corruptions"), 3)),
-                "short_answer_threshold": 50,
                 "candidate_multiplier": 3
             }
         }
@@ -711,14 +676,6 @@ IMPORTANT: Match defenses to specific threats:
                 "similarity_threshold": 0.92 if level == "CRITICAL" else 0.88,
                 "rouge_threshold": 0.25,
                 "candidate_multiplier": 3
-            },
-            "attention_filtering": {
-                "enabled": threats.get("jailbreak", 0) > 0.4 or threats.get("content_leakage", 0) > 0.4,
-                "model_path": self.config.get("av_model_path", "meta-llama/Llama-3.1-8B-Instruct"),
-                "top_tokens": 100,
-                "max_corruptions": 3,
-                "short_answer_threshold": 50,
-                "candidate_multiplier": 3
             }
         }
         
@@ -733,7 +690,7 @@ IMPORTANT: Match defenses to specific threats:
         
         IMPORTANT: Respects stage boundaries:
         - pre_retrieval: Can only enable DP
-        - post_retrieval: Can only enable TrustRAG, AV
+        - post_retrieval: Can only enable TrustRAG
         """
         threats = risk_profile.specific_threats
         level = risk_profile.overall_threat_level
@@ -744,8 +701,6 @@ IMPORTANT: Match defenses to specific threats:
         trust_trend = threats.get('_trust_trend', 'STABLE')
         mia_threat = threats.get('membership_inference', 0)
         poison_threat = threats.get('data_poisoning', 0)
-        jailbreak_threat = threats.get('jailbreak', 0)
-        leakage_threat = threats.get('content_leakage', 0)
         
         # --- DIFFERENTIAL PRIVACY DECISION (PRE-RETRIEVAL ONLY) ---
         dp_enabled = False
@@ -796,17 +751,6 @@ IMPORTANT: Match defenses to specific threats:
                 else:
                     similarity_threshold = 0.90
         
-        # --- ATTENTION FILTERING DECISION (POST-RETRIEVAL ONLY) ---
-        av_enabled = False
-        
-        if stage == "post_retrieval":
-            if jailbreak_threat > 0.4 or leakage_threat > 0.4:
-                av_enabled = True
-            if metrics.get("m_cmp", 0) > 0.6:  # High complexity = obfuscation
-                av_enabled = True
-            if level == "CRITICAL":
-                av_enabled = True
-        
         # Build final plan
         plan = {
             "differential_privacy": {
@@ -820,14 +764,6 @@ IMPORTANT: Match defenses to specific threats:
                 "enabled": trustrag_enabled,
                 "similarity_threshold": similarity_threshold,
                 "rouge_threshold": 0.25,
-                "candidate_multiplier": 3
-            },
-            "attention_filtering": {
-                "enabled": av_enabled,
-                "model_path": self.config.get("av_model_path", "meta-llama/Llama-3.1-8B-Instruct"),
-                "top_tokens": 100,
-                "max_corruptions": 3,
-                "short_answer_threshold": 50,
                 "candidate_multiplier": 3
             }
         }

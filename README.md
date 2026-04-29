@@ -15,12 +15,10 @@ A modular, reproducible RAG (Retrieval Augmented Generation) pipeline designed f
     ```bash
     ollama pull llama3
     ```
-*   **Hugging Face Login** (Required for AV Defense):
-    The *Attention-based Verification (AV)* defense uses a local Llama 3 model which requires authentication.
+*   **Hugging Face Login** (when using the Hugging Face generation backend or gated models):
     ```bash
     hf auth login
-    # When prompted, enter your Hugging Face token.
-    # Ensure you have access to meta-llama/Llama-3.1-8B-Instruct.
+    # When prompted, enter your Hugging Face token if your chosen model requires it.
     ```
 
 

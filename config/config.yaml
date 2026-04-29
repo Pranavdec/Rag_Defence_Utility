@@ -40,14 +40,19 @@ defenses:
   similarity_threshold: 0.88
   rouge_threshold: 0.25
   candidate_multiplier: 3
-- name: attention_filtering
+# Privacy-Aware Decoding (PAD): decode-time logits noise; requires system.llm.provider huggingface or hf
+- name: privacy_aware_decoding
   enabled: false
-  model_path: meta-llama/Llama-3.1-8B-Instruct
-  top_tokens: 100
-  max_corruptions: 3
-  threshold: 50
-  device: cuda
-  candidate_multiplier: 3
+  epsilon: 0.2
+  noise_amplification: 3.0
+  min_sensitivity: 0.4
+  noise_type: adaptive
+  enable_screening: true
+  enable_calibration: true
+  static_noise_scale: 0.1
+  alpha: 10.0
+  delta: 1.0e-5
+  candidate_multiplier: 1
 attack:
   mba:
     enabled: false
@@ -67,6 +72,11 @@ attack:
     seed: 42
     target_start_index: 0
     diversity_level: true
+  ikea:
+    enabled: false
+    topic: ""   # empty → inferred from data.dataset (see src/attacks/ikea.py)
+    n_rounds: 32
+    max_corpus_chunks: 500
 ado:
   enabled: false
   user_id: test_user_001

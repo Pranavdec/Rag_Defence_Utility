@@ -12,6 +12,20 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def _warn_if_pad_on_incompatible_backend(defense_manager, provider: str) -> None:
+    """PAD uses HF LogitsProcessor; vLLM/Ollama cannot apply it."""
+    if defense_manager is None or not defense_manager.is_privacy_aware_decoding_active():
+        return
+    p = (provider or "").lower()
+    if p in ("vllm", "ollama"):
+        logger.warning(
+            "PAD (privacy_aware_decoding) is enabled but LLM provider is %s. "
+            "PAD requires Hugging Face generation with logits_processor and will not apply. "
+            "Set system.llm.provider to huggingface or hf to use PAD.",
+            p,
+        )
+
+
 class HuggingFaceGenerator:
     """Wrapper for Hugging Face Transformers LLM generation."""
     
@@ -20,7 +34,8 @@ class HuggingFaceGenerator:
         model_path: str = "meta-llama/Llama-3.1-8B-Instruct",
         temperature: float = 0.0,
         device: str = "auto",
-        shared_model=None
+        shared_model=None,
+        defense_manager=None,
     ):
         """
         Initialize HuggingFace generator.
@@ -30,10 +45,12 @@ class HuggingFaceGenerator:
             temperature: Generation temperature (0.0 = deterministic)
             device: "cuda", "cpu", or "auto"
             shared_model: Optional pre-loaded model instance (for sharing with AV defense)
+            defense_manager: Optional DefenseManager for PAD (HF logits_processor).
         """
         self.model_path = model_path
         self.temperature = temperature
         self.device = device
+        self.defense_manager = defense_manager
         
         if shared_model is not None:
             # Reuse shared model from AV defense
@@ -125,18 +142,20 @@ Answer:"""
             padding=True
         ).to(self.llm.model.device)
         
+        gen_kwargs: Dict[str, Any] = {
+            "attention_mask": inputs["attention_mask"],
+            "pad_token_id": self.llm.tokenizer.eos_token_id,
+            "do_sample": self.temperature > 0,
+            "temperature": self.temperature if self.temperature > 0 else None,
+            "use_cache": True,
+        }
+        if self.defense_manager is not None:
+            gen_kwargs.update(self.defense_manager.get_hf_extra_generation_kwargs())
+
         # Generate with latency tracking
         start_time = time.time()
         with torch.no_grad():
-            outputs = self.llm.model.generate(
-                inputs['input_ids'],
-                attention_mask=inputs['attention_mask'],
-                pad_token_id=self.llm.tokenizer.eos_token_id,
-                # max_new_tokens=512,
-                do_sample=self.temperature > 0,
-                temperature=self.temperature if self.temperature > 0 else None,
-                use_cache=True,
-            )
+            outputs = self.llm.model.generate(inputs["input_ids"], **gen_kwargs)
         latency_ms = (time.time() - start_time) * 1000
         
         # Decode only the new tokens
@@ -153,15 +172,18 @@ Answer:"""
     def generate_simple(self, prompt: str) -> str:
         """Simple generation without context (for testing)."""
         inputs = self.llm.tokenizer(prompt, return_tensors="pt").to(self.llm.model.device)
-        
+
+        gen_kwargs: Dict[str, Any] = {
+            "pad_token_id": self.llm.tokenizer.eos_token_id,
+            "max_new_tokens": 512,
+            "do_sample": self.temperature > 0,
+            "temperature": self.temperature if self.temperature > 0 else None,
+        }
+        if self.defense_manager is not None:
+            gen_kwargs.update(self.defense_manager.get_hf_extra_generation_kwargs())
+
         with torch.no_grad():
-            outputs = self.llm.model.generate(
-                inputs['input_ids'],
-                pad_token_id=self.llm.tokenizer.eos_token_id,
-                max_new_tokens=512,
-                do_sample=self.temperature > 0,
-                temperature=self.temperature if self.temperature > 0 else None,
-            )
+            outputs = self.llm.model.generate(inputs["input_ids"], **gen_kwargs)
         
         generated_ids = outputs[:, inputs['input_ids'].shape[1]:]
         return self.llm.tokenizer.decode(generated_ids[0], skip_special_tokens=True).strip()
@@ -264,6 +286,7 @@ def create_generator(config: Dict[str, Any], defense_manager=None):
     temperature = llm_config.get("temperature", 0.0)
     
     if provider == "vllm":
+        _warn_if_pad_on_incompatible_backend(defense_manager, "vllm")
         from .vllm_model import VLLMGenerator
         model_path = llm_config.get("model_path", "meta-llama/Llama-3.1-8B-Instruct")
         gpu_memory_utilization = llm_config.get("gpu_memory_utilization", 0.9)
@@ -280,6 +303,7 @@ def create_generator(config: Dict[str, Any], defense_manager=None):
         )
         
     elif provider == "ollama":
+        _warn_if_pad_on_incompatible_backend(defense_manager, "ollama")
         model_name = llm_config.get("model_name", "llama3")
         logger.info(f"Using Ollama generator with model: {model_name}")
         return OllamaGenerator(model_name=model_name, temperature=temperature)
@@ -299,7 +323,8 @@ def create_generator(config: Dict[str, Any], defense_manager=None):
             model_path=model_path,
             temperature=temperature,
             device=device,
-            shared_model=shared_model
+            shared_model=shared_model,
+            defense_manager=defense_manager,
         )
     
     else:
@@ -309,5 +334,6 @@ def create_generator(config: Dict[str, Any], defense_manager=None):
         return HuggingFaceGenerator(
             model_path=model_path,
             temperature=temperature,
-            device=device
+            device=device,
+            defense_manager=defense_manager,
         )

@@ -68,7 +68,6 @@ Nwarmup belongs to {10, 25, 50, 100}.
 
 ## **Part 3: Defense Suite**
 
-*(Note: AV Filtering has been completely removed from the primary orchestration pipeline to streamline testing and focus on routing. See Block A for ablation).*
 
 ### **3.1 Defense Inventory**
 
@@ -86,7 +85,6 @@ Nwarmup belongs to {10, 25, 50, 100}.
 
 * **Objective:** Empirically quantify the severe drop in retrieval utility when static defenses are forced to fight through a massive, noisy vector space.  
 * **Task:** Run the Base pipeline and the Full Static Stack on 200 benign utility queries across the 50,000+ distractor corpus.  
-* **AV Filter Justification (Ablation):** Add a single run comparing (AV-only) vs. (TrustRAG-only) utility and ASR scores at the 50k scale to empirically justify the AV filter's removal from the primary stack.  
 * **Embedding Sensitivity (Ablation):** Run Block A on NQ using BGE-large-en-v1.5 to definitively prove the paradox is not an artifact of weak embedding models (all-MiniLM-L6-v2).  
 * **Metrics:** Contextual Recall (CR), Contextual Relevancy (CP), Answer Relevancy (AR), and Faithfulness (F).
 

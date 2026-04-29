@@ -2,7 +2,7 @@
 
 Implementation-aligned method blocks from current codebase.
 
-Sources: `src/core/pipeline.py`, `src/core/sensing.py`, `src/core/ado.py`, `src/defenses/dp_rag.py`, `src/defenses/trustrag.py`, `src/defenses/av_defense.py`, `src/attacks/mba.py`.
+Sources: `src/core/pipeline.py`, `src/core/sensing.py`, `src/core/ado.py`, `src/defenses/dp_rag.py`, `src/defenses/trustrag.py`, `src/defenses/pad.py`, `src/attacks/mba.py`.
 
 ## Algorithm 1: Adaptive Defensive RAG Inference
 
@@ -76,16 +76,16 @@ Input: retrieved docs D with embeddings E
 6: return filtered documents
 ```
 
-## Algorithm 3: Attention-Based Corruption Pruning
+## Algorithm 3: Privacy-Aware Decoding (decode-time, optional)
+
+Applied inside Hugging Face generation when `privacy_aware_decoding` is enabled (`src/defenses/pad.py`). Not available under vLLM/Ollama backends.
 
 ```text
-Input: contexts C, question q, max removals R, variance threshold τ
-1: Rank contexts twice using normalized passage attention scores
-2: for r in 1..R:
-3:    p <- passage attention distribution for current C
-4:    if Var(p) <= τ: break
-5:    remove argmax_j p_j from C
-6: return C
+Input: vocabulary logits z at step t (generation loop)
+1: Optionally apply screening on z (minimal noise if already highly confident)
+2: Estimate sensitivity from top logit margins; compute noise scale σ (DP bookkeeping per step)
+3: z' <- z + Normal(0, σ^2) element-wise
+4: Pass z' to sampling / greedy decode for the next token
 ```
 
 ## Function 4: MBA Membership Classifier

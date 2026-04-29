@@ -68,14 +68,6 @@ defenses:
   similarity_threshold: 0.88
   rouge_threshold: 0.25
   candidate_multiplier: 3
-- name: attention_filtering
-  enabled: ${av_enabled}
-  model_path: meta-llama/Llama-3.1-8B-Instruct
-  top_tokens: 100
-  max_corruptions: 3
-  threshold: 50
-  device: cuda
-  candidate_multiplier: 3
 attack:
   mba:
     enabled: ${mba_enabled}
@@ -143,10 +135,6 @@ run_test "nq_02_poisoning_only" "NQ: Just poisoning enabled"
 update_config "nq" 1000 false false true false true false false
 run_test "nq_03_poisoning_trustrag" "NQ: Poisoning and TrustRAG enabled"
 
-# NQ - Poisoning + Attention Filtering
-update_config "nq" 1000 false false true false false true false
-run_test "nq_04_poisoning_av" "NQ: Poisoning and Attention Filtering enabled"
-
 # NQ - All attacks disabled, defense combinations
 # Just DP
 update_config "nq" 1000 false false false true false false false
@@ -156,24 +144,12 @@ run_test "nq_05_dp_only" "NQ: Just Differential Privacy enabled"
 update_config "nq" 1000 false false false false true false false
 run_test "nq_06_trustrag_only" "NQ: Just TrustRAG enabled"
 
-# Just AV
-update_config "nq" 1000 false false false false false true false
-run_test "nq_07_av_only" "NQ: Just Attention Filtering enabled"
-
 # DP + TrustRAG
 update_config "nq" 1000 false false false true true false false
 run_test "nq_08_dp_trustrag" "NQ: DP and TrustRAG enabled"
 
-# DP + AV
-update_config "nq" 1000 false false false true false true false
-run_test "nq_09_dp_av" "NQ: DP and Attention Filtering enabled"
-
-# TrustRAG + AV
-update_config "nq" 1000 false false false false true true false
-run_test "nq_10_trustrag_av" "NQ: TrustRAG and Attention Filtering enabled"
-
 # All defenses
-update_config "nq" 1000 false false false true true true false
+update_config "nq" 1000 false false false true true false false
 run_test "nq_11_all_defenses" "NQ: All defenses enabled"
 
 # # ==========================================
@@ -283,7 +259,7 @@ run_test "nq_11_all_defenses" "NQ: All defenses enabled"
 # # ==========================================
 
 # NQ - Both attacks + ADO
-update_config "nq" 1000 false true true false false false true
+update_config "nq" 1000 false true true false false false false true
 run_test "nq_12_both_attacks_ado" "NQ: Both attacks and ADO enabled"
 
 # # PubMedQA - Both attacks + ADO

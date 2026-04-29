@@ -136,15 +136,11 @@ DEFENSE_COMBOS = {
     'none': {'dp': False, 'trustrag': False, 'av': False, 'ado': False},
     'dp': {'dp': True, 'trustrag': False, 'av': False, 'ado': False},
     'trustrag': {'dp': False, 'trustrag': True, 'av': False, 'ado': False},
-    'av': {'dp': False, 'trustrag': False, 'av': True, 'ado': False},
     'dp_trustrag': {'dp': True, 'trustrag': True, 'av': False, 'ado': False},
-    'dp_av': {'dp': True, 'trustrag': False, 'av': True, 'ado': False},
-    'trustrag_av': {'dp': False, 'trustrag': True, 'av': True, 'ado': False},
-    'all_static': {'dp': True, 'trustrag': True, 'av': True, 'ado': False},
     'ado_only': {'dp': False, 'trustrag': False, 'av': False, 'ado': True},
     'ado_dp': {'dp': True, 'trustrag': False, 'av': False, 'ado': True},
     'ado_trustrag': {'dp': False, 'trustrag': True, 'av': False, 'ado': True},
-    'ado_all': {'dp': True, 'trustrag': True, 'av': True, 'ado': True},
+    'ado_all': {'dp': True, 'trustrag': True, 'av': False, 'ado': True},
 }
 
 
@@ -163,8 +159,7 @@ def update_config_file(dp: bool, trustrag: bool, av: bool, ado: bool, config_pat
             defense['enabled'] = dp
         elif defense['name'] == 'trustrag':
             defense['enabled'] = trustrag
-        elif defense['name'] == 'attention_filtering':
-            defense['enabled'] = av
+        # NOTE: Attention filtering (AV) defense removed from codebase.
     
     # Update ADO
     if 'ado' not in config:
@@ -236,20 +231,6 @@ class ComprehensiveEvaluator:
                 logger.info("RAG models cleaned up")
             except Exception as e:
                 logger.warning(f"Error cleaning up RAG models: {e}")
-        
-        # Clear any shared models from AV defense
-        try:
-            from src.defenses.av_defense import AttentionFilteringDefense
-            if hasattr(AttentionFilteringDefense, '_shared_model'):
-                if AttentionFilteringDefense._shared_model is not None:
-                    try:
-                        AttentionFilteringDefense._shared_model.cpu()
-                    except:
-                        pass
-                AttentionFilteringDefense._shared_model = None
-                AttentionFilteringDefense._shared_model_path = None
-        except Exception:
-            pass
         
         # Force garbage collection first
         gc.collect()
@@ -543,7 +524,7 @@ class ComprehensiveEvaluator:
         metrics = EvaluationMetrics()
         metrics.ado_enabled = ado_enabled
         metrics.total_queries = len(results)
-        metrics.defenses_triggered = {"differential_privacy": 0, "trustrag": 0, "attention_filtering": 0}
+        metrics.defenses_triggered = {"differential_privacy": 0, "trustrag": 0}
         metrics.risk_level_counts = {}
         
         total_latency = 0.0

@@ -14,7 +14,7 @@ The system follows a modular "Pipeline" architecture with **Attacks**, **Defense
 
 1. **Ingestion:** Raw Dataset → `Data Loader` → Sampled QA Pairs → Index Gold Passages → ChromaDB
 2. **Attack Generation:** Target Questions → `Attack Module` → Poisoned/Adversarial Documents → Injected into VectorDB
-3. **Defense Layer:** Query → `Defense Manager` (DP-RAG, TrustRAG, AV) → Filtered Retrieval
+3. **Defense Layer:** Query → `Defense Manager` (DP-RAG, TrustRAG, PAD) → Filtered Retrieval
 4. **ADO Layer:** Query → `Sentinel` (Threat Analysis) → `Strategist` (Defense Plan) → Dynamic Defense Activation
 5. **Inference:** Filtered Context → `LLM Generation` → Answer
 6. **Evaluation:** Results → `DeepEval` + Custom Metrics → JSON/CSV Reports
@@ -68,14 +68,13 @@ rag-defense-utility/
 │   │   ├── manager.py           # Defense orchestration
 │   │   ├── dp_rag.py            # Differential Privacy RAG
 │   │   ├── trustrag.py          # TrustRAG (similarity + rouge filtering)
-│   │   └── av_defense.py        # Attention-based Verification
+│   │   └── pad.py               # Privacy-Aware Decoding (HF decode-time noise)
 │   │
 │   └── evaluation/
 │       └── evaluator.py         # DeepEval + custom metrics
 │
 ├── tests/
-│   ├── test_mba_attack.py
-│   └── test_av_defense_mock.py
+│   └── test_mba_attack.py
 │
 └── main.py                      # CLI runner
 ```
@@ -102,11 +101,11 @@ rag-defense-utility/
 |---------|-------------|----------------|
 | **DP-RAG** | Differential Privacy via approximate DP mechanism | `epsilon=3.0`, `delta=0.01` |
 | **TrustRAG** | Filters documents by similarity + ROUGE thresholds | `similarity_threshold=0.88`, `rouge_threshold=0.25` |
-| **AV Defense** | Attention-based verification using Llama 3.1 | `top_tokens=100`, `max_corruptions=3` |
+| **PAD** | Privacy-Aware Decoding (noise at decode time via HF logits) | `epsilon`, `noise_amplification`, etc. |
 
 **Defense Combinations Available:**
-- `none`, `dp`, `trustrag`, `av`
-- `dp_trustrag`, `dp_av`, `trustrag_av`, `all_static`
+- `none`, `dp`, `trustrag`, `pad`
+- `dp_trustrag`, `dp_pad`, `trustrag_pad`, `all_static` (stack DP + TrustRAG + PAD in config)
 - `ado_only`, `ado_dp`, `ado_trustrag`, `ado_all`
 
 ### C. Attack Mechanisms (`src/attacks/`)
@@ -183,9 +182,6 @@ defenses:
     enabled: false
     similarity_threshold: 0.88
     rouge_threshold: 0.25
-  - name: attention_filtering
-    enabled: false
-    model_path: meta-llama/Llama-3.1-8B-Instruct
 
 attack:
   mba:
@@ -258,6 +254,6 @@ python scripts/ingest_data.py pubmedqa
 ## 7. Prerequisites
 
 - Python 3.10+
-- CUDA-capable GPU (recommended for AV defense and MBA)
+- CUDA-capable GPU (recommended for local LLM inference and MBA)
 - Ollama running locally (`ollama serve && ollama pull llama3`)
 - HuggingFace authentication for Llama models (`huggingface-cli login`)

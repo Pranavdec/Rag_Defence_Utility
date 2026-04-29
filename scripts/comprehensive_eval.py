@@ -37,6 +37,7 @@ from src.core.pipeline import ModularRAG, get_loader, load_config
 from src.core.retrieval import VectorStore
 from src.attacks.poisoned_rag import PoisonedRAGFramework
 from src.attacks.mba import MBAFramework
+from src.attacks.rag_mia import RAGMIAFramework, RAGMIAPayload
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -55,7 +56,7 @@ logging.getLogger("transformers").setLevel(logging.WARNING)
 class QueryResult:
     """Result of a single query."""
     query: str
-    query_type: str  # 'benign', 'mba', 'poisoning'
+    query_type: str  # 'benign', 'mba', 'poisoning', 'rag_mia'
     answer: str
     expected_answer: Optional[str]
     success: bool
@@ -89,6 +90,15 @@ class EvaluationMetrics:
     mba_avg_mask_accuracy: float = 0.0  # Average accuracy of filled masks across all MBA queries
     mba_member_accuracy: float = 0.0  # Accuracy on member documents
     mba_non_member_accuracy: float = 0.0  # Accuracy on non-member documents
+
+    rag_mia_total: int = 0
+    rag_mia_blackbox_accuracy: float = 0.0
+    rag_mia_blackbox_tpr: float = 0.0
+    rag_mia_blackbox_fpr: float = 0.0
+    rag_mia_retrieval_success_member: float = 0.0
+    rag_mia_retrieval_success_non_member: float = 0.0
+
+    rag_mia_graybox_auc: float = 0.0
     
     # Performance
     avg_latency_ms: float = 0.0
@@ -339,6 +349,7 @@ class ConfigDrivenEvaluator:
         """
         all_prompts = []
         all_metadata = []
+        prompts_by_type: Dict[str, List[str]] = {}
         
         # 1. Benign Queries
         logger.info("  Harvesting benign queries...")
@@ -351,6 +362,7 @@ class ConfigDrivenEvaluator:
             # Format prompt using vLLM formatter
             prompt = self._format_harvested_prompt(harvest_result)
             all_prompts.append(prompt)
+            prompts_by_type.setdefault("benign", []).append(prompt)
             
             all_metadata.append({
                 "type": "benign",
@@ -400,6 +412,7 @@ class ConfigDrivenEvaluator:
                 poison_answer = f"ATTACK_SUCCESS_{idx}"
                 prompt = self._format_harvested_prompt(harvest_result)
                 all_prompts.append(prompt)
+                prompts_by_type.setdefault("poisoning", []).append(prompt)
                 
                 all_metadata.append({
                     "type": "poisoning",
@@ -429,6 +442,7 @@ class ConfigDrivenEvaluator:
                 
                 prompt = self._format_harvested_prompt(harvest_result)
                 all_prompts.append(prompt)
+                prompts_by_type.setdefault("mba", []).append(prompt)
                 
                 all_metadata.append({
                     "type": "mba",
@@ -439,6 +453,41 @@ class ConfigDrivenEvaluator:
                     "mba_payload": payload,  # For evaluation later
                 })
             print()
+
+        # 4. RAG-MIA Queries (if enabled)
+        rag_mia_config = self.config.get("attack", {}).get("rag_mia", {})
+        if rag_mia_config.get("enabled", False):
+            logger.info("  Harvesting RAG-MIA attack queries...")
+
+            mia_framework = RAGMIAFramework(self.config)
+            mia_payloads = mia_framework.generate_attack_dataset()
+
+            for i, payload in enumerate(mia_payloads):
+                print(f"\r    RAG-MIA {i+1}/{len(mia_payloads)}", end="", flush=True)
+
+                attack_prompt = mia_framework.craft_attack_prompt(payload.target_sample)
+                harvest_result = self.rag.harvest_prompt(attack_prompt)
+
+                prompt = self._format_harvested_prompt(harvest_result)
+                all_prompts.append(prompt)
+                prompts_by_type.setdefault("rag_mia", []).append(prompt)
+
+                all_metadata.append({
+                    "type": "rag_mia",
+                    "query": attack_prompt[:100] + "..." if len(attack_prompt) > 100 else attack_prompt,
+                    "expected_answer": "Yes/No",
+                    "harvest_result": harvest_result,
+                    "latency_ms": 0,
+                    "rag_mia_payload": {
+                        "id": payload.id,
+                        "target_sample": payload.target_sample,
+                        "is_member": payload.is_member,
+                    },
+                })
+            print()
+
+        # Cache prompts grouped by type for later per-attack post-processing (e.g., gray-box scoring)
+        self._harvest_cache = {"prompts_by_type": prompts_by_type}
         
         return {
             "prompts": all_prompts,
@@ -640,6 +689,10 @@ class ConfigDrivenEvaluator:
         
         mba_payloads = []
         mba_responses = []
+
+        rag_mia_payloads: List[Dict[str, Any]] = []
+        rag_mia_answers: List[str] = []
+        rag_mia_harvest_results: List[Dict[str, Any]] = []
         
         for i, (metadata, answer) in enumerate(zip(all_metadata, answers)):
             query_type = metadata["type"]
@@ -655,6 +708,12 @@ class ConfigDrivenEvaluator:
                 success = False  # Will be evaluated separately
                 mba_payloads.append(metadata["mba_payload"])
                 mba_responses.append(answer)
+            elif query_type == "rag_mia":
+                # Evaluated separately (black-box + optional gray-box)
+                success = False
+                rag_mia_payloads.append(metadata["rag_mia_payload"])
+                rag_mia_answers.append(answer)
+                rag_mia_harvest_results.append(metadata.get("harvest_result", {}))
             else:
                 success = False
             
@@ -686,6 +745,118 @@ class ConfigDrivenEvaluator:
             metrics.mba_avg_mask_accuracy = mba_eval.get("avg_mask_accuracy", 0.0)
             metrics.mba_member_accuracy = mba_eval.get("member_accuracy", 0.0)
             metrics.mba_non_member_accuracy = mba_eval.get("non_member_accuracy", 0.0)
+
+        # Evaluate RAG-MIA results if present (black-box + optional gray-box)
+        if rag_mia_payloads:
+            logger.info(f"\n  Evaluating {len(rag_mia_payloads)} RAG-MIA results...")
+            mia_framework = RAGMIAFramework(self.config)
+
+            # Black-box: parse Yes/No from generated answers
+            y_true: List[int] = []
+            y_pred: List[int] = []
+            retrieval_success: List[bool] = []
+            for p, ans, h in zip(rag_mia_payloads, rag_mia_answers, rag_mia_harvest_results):
+                is_member = bool(p.get("is_member", False))
+                target_sample = p.get("target_sample", "")
+                contexts = (h or {}).get("contexts", []) or []
+                retrieved = mia_framework.retrieval_success(target_sample, contexts)
+                retrieval_success.append(retrieved)
+
+                pred_member = mia_framework.infer_membership_from_text(ans)
+                y_true.append(1 if is_member else 0)
+                y_pred.append(1 if pred_member else 0)
+
+            total = len(y_true)
+            tp = sum(1 for t, pr in zip(y_true, y_pred) if t == 1 and pr == 1)
+            tn = sum(1 for t, pr in zip(y_true, y_pred) if t == 0 and pr == 0)
+            fp = sum(1 for t, pr in zip(y_true, y_pred) if t == 0 and pr == 1)
+            fn = sum(1 for t, pr in zip(y_true, y_pred) if t == 1 and pr == 0)
+            metrics.rag_mia_total = total
+            metrics.rag_mia_blackbox_accuracy = ((tp + tn) / total) if total else 0.0
+            metrics.rag_mia_blackbox_tpr = (tp / (tp + fn)) if (tp + fn) else 0.0
+            metrics.rag_mia_blackbox_fpr = (fp / (fp + tn)) if (fp + tn) else 0.0
+
+            # Retrieval success rates (member vs non-member)
+            member_rs = [rs for rs, t in zip(retrieval_success, y_true) if t == 1]
+            non_member_rs = [rs for rs, t in zip(retrieval_success, y_true) if t == 0]
+            metrics.rag_mia_retrieval_success_member = (sum(member_rs) / len(member_rs)) if member_rs else 0.0
+            metrics.rag_mia_retrieval_success_non_member = (sum(non_member_rs) / len(non_member_rs)) if non_member_rs else 0.0
+
+            # Gray-box: score Yes/No next-token and train an ensemble (if enabled)
+            rag_mia_gray = self.config.get("attack", {}).get("rag_mia", {}).get("gray_box", {})
+            if rag_mia_gray.get("enabled", False):
+                try:
+                    import numpy as np
+                    from sklearn.model_selection import train_test_split
+                    from sklearn.metrics import roc_auc_score
+                    from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+                    from sklearn.linear_model import LogisticRegression
+
+                    from src.core.vllm_model import VLLMGenerator
+
+                    llm_config = self.config.get("system", {}).get("llm", {})
+                    gen_config = self.config.get("generation", {})
+                    model_path = llm_config.get(
+                        "model_path",
+                        gen_config.get("model_name", "meta-llama/Llama-3.1-8B-Instruct"),
+                    )
+                    temperature = llm_config.get("temperature", gen_config.get("temperature", 0.0))
+
+                    logger.info("  Scoring Yes/No token preferences for RAG-MIA gray-box...")
+                    scorer = VLLMGenerator(
+                        model_path=model_path,
+                        temperature=temperature,
+                        gpu_memory_utilization=llm_config.get(
+                            "gpu_memory_utilization", gen_config.get("gpu_memory_utilization", 0.9)
+                        ),
+                        tensor_parallel_size=llm_config.get(
+                            "tensor_parallel_size", gen_config.get("tensor_parallel_size", 1)
+                        ),
+                    )
+
+                    # Build features from the *exact* formatted prompts used for generation.
+                    X = []
+                    for prompt in self._harvest_cache["prompts_by_type"]["rag_mia"]:
+                        scored = scorer.score_next_token(prompt, candidate_texts=("Yes", "No"), max_logprobs=50)
+                        yes = scored["candidates"].get("Yes", {}).get("best_score")
+                        no = scored["candidates"].get("No", {}).get("best_score")
+                        # If missing from top-logprobs, fall back to a very small number.
+                        yes_v = float(yes) if yes is not None else -1e9
+                        no_v = float(no) if no is not None else -1e9
+                        X.append([yes_v, no_v, yes_v - no_v])
+
+                    scorer.close()
+
+                    X = np.array(X, dtype=np.float32)
+                    y = np.array(y_true, dtype=np.int64)
+
+                    test_size = float(rag_mia_gray.get("test_size", 0.4))
+                    seed = int(rag_mia_gray.get("seed", 123))
+                    X_tr, X_te, y_tr, y_te = train_test_split(
+                        X, y, test_size=test_size, random_state=seed, stratify=y if len(set(y)) > 1 else None
+                    )
+
+                    # Simple ensemble (40 models) with mixed learners
+                    n_models = int(rag_mia_gray.get("n_models", 40))
+                    probs = []
+                    rng = np.random.default_rng(seed)
+                    for i in range(n_models):
+                        idx = rng.choice(len(X_tr), size=max(2, len(X_tr) // 2), replace=False)
+                        choice = int(rng.integers(0, 3))
+                        if choice == 0:
+                            clf = RandomForestClassifier(n_estimators=80, max_depth=6, random_state=seed + i)
+                        elif choice == 1:
+                            clf = GradientBoostingClassifier(n_estimators=80, max_depth=3, random_state=seed + i)
+                        else:
+                            clf = LogisticRegression(max_iter=2000, random_state=seed + i)
+                        clf.fit(X_tr[idx], y_tr[idx])
+                        probs.append(clf.predict_proba(X_te)[:, 1])
+
+                    p = np.mean(np.stack(probs, axis=0), axis=0)
+                    metrics.rag_mia_graybox_auc = float(roc_auc_score(y_te, p)) if len(set(y_te)) > 1 else 0.0
+
+                except Exception as e:
+                    logger.warning(f"  RAG-MIA gray-box evaluation skipped/failed: {e}")
         
         # Aggregate metrics
         metrics = self._aggregate_metrics(all_results, metrics)
@@ -1093,7 +1264,7 @@ class ConfigDrivenEvaluator:
                 metrics.risk_level_counts[risk] = metrics.risk_level_counts.get(risk, 0) + 1
                 
                 plan = r.ado_metadata.get("defense_plan", {})
-                for defense_name in ["differential_privacy", "trustrag", "attention_filtering"]:
+                for defense_name in ["differential_privacy", "trustrag"]:
                     if plan.get(defense_name, {}).get("enabled", False):
                         metrics.defenses_triggered[defense_name] = metrics.defenses_triggered.get(defense_name, 0) + 1
             

@@ -1,7 +1,7 @@
 import logging
 import time
 import os
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Sequence, Tuple
 
 from .model import Model
 
@@ -143,6 +143,103 @@ class VLLMGenerator:
             results.append(output.outputs[0].text.strip())
             
         return results
+
+    def score_next_token(
+        self,
+        prompt: str,
+        candidate_texts: Sequence[str] = ("Yes", "No"),
+        *,
+        max_logprobs: int = 50,
+    ) -> Dict[str, Any]:
+        """
+        Return logprob-like scores for the *next generated token* after `prompt`.
+
+        Intended for gray-box attacks (e.g., RAG-MIA) where you compare preference
+        between candidates such as "Yes" vs "No".
+
+        Notes:
+        - Different tokenizers may encode "Yes"/"No" with or without a leading
+          whitespace token. We score both variants when possible.
+        - If a candidate token is not present in returned `top_logprobs`,
+          its score will be `None`.
+        """
+        import vllm
+
+        if not prompt:
+            raise ValueError("prompt must be a non-empty string")
+
+        # Use a 1-token generation with logprobs enabled.
+        # Keep temperature 0 for determinism in scoring.
+        sampling = vllm.SamplingParams(
+            temperature=0.0,
+            top_p=1.0,
+            max_tokens=1,
+            logprobs=int(max_logprobs),
+        )
+
+        outputs = self.llm.generate([prompt], sampling, use_tqdm=False)
+        if not outputs or not outputs[0].outputs:
+            return {"candidates": {}, "raw": None}
+
+        # vLLM returns per-generated-token `logprobs` (a list) where each entry
+        # contains a `top_logprobs` mapping from token_id -> Logprob.
+        out0 = outputs[0].outputs[0]
+        token_logprobs = getattr(out0, "logprobs", None)
+        if not token_logprobs:
+            return {"candidates": {}, "raw": out0}
+
+        # First generated token only.
+        step0 = token_logprobs[0] if isinstance(token_logprobs, list) else token_logprobs
+        top_logprobs = getattr(step0, "top_logprobs", None) or {}
+
+        tokenizer = self.llm.get_tokenizer()
+
+        def _ids_for_text(text: str) -> List[int]:
+            # Try both raw and leading-space forms (common for BPE tokenizers).
+            ids: List[int] = []
+            for variant in (text, f" {text}"):
+                try:
+                    enc = tokenizer.encode(variant, add_special_tokens=False)
+                    if enc:
+                        ids.append(int(enc[0]))
+                except Exception:
+                    continue
+            # De-dup while preserving order
+            seen = set()
+            uniq: List[int] = []
+            for i in ids:
+                if i not in seen:
+                    uniq.append(i)
+                    seen.add(i)
+            return uniq
+
+        def _score_token_id(tok_id: int) -> Optional[float]:
+            # `top_logprobs` values may be floats or objects with `.logprob`.
+            if tok_id not in top_logprobs:
+                return None
+            v = top_logprobs[tok_id]
+            if isinstance(v, (int, float)):
+                return float(v)
+            if hasattr(v, "logprob"):
+                try:
+                    return float(v.logprob)
+                except Exception:
+                    return None
+            return None
+
+        cand_scores: Dict[str, Dict[str, Any]] = {}
+        for cand in candidate_texts:
+            ids = _ids_for_text(str(cand))
+            scored: List[Tuple[int, Optional[float]]] = [(i, _score_token_id(i)) for i in ids]
+            best = None
+            for _, s in scored:
+                if s is None:
+                    continue
+                if best is None or s > best:
+                    best = s
+            cand_scores[str(cand)] = {"token_ids": ids, "scores": scored, "best_score": best}
+
+        return {"candidates": cand_scores, "raw": out0}
 
     def close(self):
         """Best-effort cleanup for vLLM resources."""
