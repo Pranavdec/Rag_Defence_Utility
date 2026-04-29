@@ -20,9 +20,10 @@ class LocalEmbedder:
     """Fast local embeddings using sentence-transformers (supports batching)."""
     
     def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
-        import os
-        os.environ["HF_HUB_OFFLINE"] = "1"  # Force offline mode so it uses the cached version
         from sentence_transformers import SentenceTransformer
+        # Do not force HF offline mode globally; it can break downstream model
+        # initialization (e.g., vLLM tokenizers). SentenceTransformers will
+        # still prefer the local cache when available.
         self.model = SentenceTransformer(model_name)
         logger.info(f"Loaded embedding model: {model_name}")
     

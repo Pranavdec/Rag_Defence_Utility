@@ -76,7 +76,12 @@ class ModularRAG:
     - Result logging for evaluation
     """
     
-    def __init__(self, config_path: str = "config/config.yaml", attack_module: Optional[Any] = None):
+    def __init__(
+        self,
+        config_path: str = "config/config.yaml",
+        attack_module: Optional[Any] = None,
+        initialize_generator: bool = True,
+    ):
         self.config = load_config(config_path)
         self.attack = attack_module
         
@@ -141,9 +146,12 @@ class ModularRAG:
             # Default test user for batch runs
             self.default_user_id = ado_config.get("user_id", "test_user_001")
 
-
         # Initialize generator (with potential model sharing from AV defense)
-        self.generator = create_generator(self.config, defense_manager=self.defense_manager)
+        # NOTE: For the 3-stage evaluator (harvest → cleanup → vLLM batch),
+        # we intentionally skip generator init so vLLM only loads in stage 2.
+        self.generator = None
+        if initialize_generator:
+            self.generator = create_generator(self.config, defense_manager=self.defense_manager)
         
         # If using HuggingFace generator with ADO, share the model with AV defense
         # This prevents OOM when ADO dynamically enables AV defense
@@ -433,6 +441,8 @@ class ModularRAG:
         )
         
         # Generate
+        if self.generator is None:
+            self.generator = create_generator(self.config, defense_manager=self.defense_manager)
         result = self.generator.generate(
             question=user_p, 
             contexts=mod_contexts,
@@ -461,6 +471,43 @@ class ModularRAG:
             "latency_ms": result["latency_ms"],
             "model": result["model"],
             "ado_metadata": ado_metadata
+        }
+
+    def harvest_prompt(self, question: str) -> Dict[str, Any]:
+        """
+        Run retrieval and static defenses, returning formatted prompt components
+        without evaluating the generator. Designed for non-ADO batching.
+        """
+        if self.ado_enabled:
+            raise RuntimeError("harvest_prompt is not supported when ADO is enabled.")
+        if self.vector_store is None:
+            raise RuntimeError("No dataset ingested. Call ingest() first.")
+        
+        # Defense Pre-Retrieval
+        query_text, fetch_k = self.defense_manager.apply_pre_retrieval(question, self.top_k)
+        
+        # Determine if embeddings are needed
+        need_embeddings = self.defense_manager.needs_embeddings
+        
+        # Retrieve
+        retrieved = self.vector_store.query(query_text, top_k=fetch_k, include_embeddings=need_embeddings)
+        
+        # Defense Post-Retrieval
+        retrieved = self.defense_manager.apply_post_retrieval(retrieved, question)
+        contexts = [r["content"] for r in retrieved]
+        
+        # Defense Pre-Generation
+        sys_p, user_p, mod_contexts = self.defense_manager.apply_pre_generation(
+            system_prompt="",
+            user_prompt=question,
+            contexts=contexts
+        )
+        
+        return {
+            "question": question,
+            "system_prompt": sys_p if sys_p else None,
+            "user_prompt": user_p,
+            "contexts": mod_contexts
         }
     
     def run_batch(

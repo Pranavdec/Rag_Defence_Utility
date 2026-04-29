@@ -24,3 +24,4 @@ tqdm==4.67.1
 numpy==2.4.0
 pandas==2.3.3
 rouge-score==0.1.2
+vllm==0.19.1

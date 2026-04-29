@@ -1,11 +1,14 @@
 system:
   embedding_model: all-MiniLM-L6-v2
   llm:
-    provider: huggingface 
+    provider: vllm 
     model_path: meta-llama/Llama-3.1-8B-Instruct
     device: auto
     temperature: 0.0
     model_name: llama3
+    tensor_parallel_size: 1
+    gpu_memory_utilization: 0.90
+    max_model_len: 2048
   judge_llm: llama3
 
 paths:
@@ -14,12 +17,12 @@ paths:
   cache: data/raw
 data:
   dataset: triviaqa
-  ingestion_size: 700
+  ingestion_size: 100
   ingestion_seed: 42
-  test_size: 50
+  test_size: 20
   test_seed: 123
 evaluation:
-  skip_deepeval: false
+  skip_deepeval: true
   deepeval_max_concurrent: 5
 retrieval:
   top_k: 5
@@ -47,7 +50,7 @@ defenses:
   candidate_multiplier: 3
 attack:
   mba:
-    enabled: true
+    enabled: false
     M: 5
     gamma: 0.35
     num_members: 30
@@ -58,14 +61,14 @@ attack:
     max_document_words: 200
     seed: 1235213
   poisoned_rag:
-    enabled: true
+    enabled: false
     poisoning_rate: 10
     num_targets: 50
     seed: 42
     target_start_index: 0
     diversity_level: true
 ado:
-  enabled: true
+  enabled: false
   user_id: test_user_001
   sentinel_model: llama3
   strategist_model: llama3

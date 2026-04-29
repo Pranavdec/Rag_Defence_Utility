@@ -260,10 +260,26 @@ def create_generator(config: Dict[str, Any], defense_manager=None):
     
 
     provider = llm_config.get("provider")
-    provider = provider.lower()
+    provider = provider.lower() if provider else "huggingface"
     temperature = llm_config.get("temperature", 0.0)
     
-    if provider == "ollama":
+    if provider == "vllm":
+        from .vllm_model import VLLMGenerator
+        model_path = llm_config.get("model_path", "meta-llama/Llama-3.1-8B-Instruct")
+        gpu_memory_utilization = llm_config.get("gpu_memory_utilization", 0.9)
+        tensor_parallel_size = llm_config.get("tensor_parallel_size", 1)
+        max_model_len = llm_config.get("max_model_len", None)
+        
+        logger.info(f"Using vLLM generator with model: {model_path}")
+        return VLLMGenerator(
+            model_path=model_path,
+            temperature=temperature,
+            gpu_memory_utilization=gpu_memory_utilization,
+            tensor_parallel_size=tensor_parallel_size,
+            max_model_len=max_model_len
+        )
+        
+    elif provider == "ollama":
         model_name = llm_config.get("model_name", "llama3")
         logger.info(f"Using Ollama generator with model: {model_name}")
         return OllamaGenerator(model_name=model_name, temperature=temperature)
