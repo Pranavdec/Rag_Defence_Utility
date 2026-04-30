@@ -3,6 +3,7 @@ PubMedQA loader for smart indexing.
 Each row has question + context (gold passage) + answer.
 """
 from typing import List, Optional
+import os
 from datasets import load_dataset
 from .base_loader import BaseLoader, QAPair
 
@@ -17,9 +18,14 @@ class PubMedLoader(BaseLoader):
     def load_qa_pairs(self, limit: Optional[int] = None, seed: int = 42) -> List[QAPair]:
         """Load QA pairs from pqa_labeled."""
         self._log(f"Loading QA pairs (limit={limit}, seed={seed})...")
-        
-        ds = load_dataset("qiaojin/PubMedQA", "pqa_labeled", split="train",
-                          cache_dir=self.cache_dir)
+
+        ds = load_dataset(
+            "qiaojin/PubMedQA",
+            "pqa_labeled",
+            split="train",
+            cache_dir=self.cache_dir,
+            download_mode="reuse_dataset_if_exists",
+        )
         
         # Shuffle deterministically
         ds = ds.shuffle(seed=seed)

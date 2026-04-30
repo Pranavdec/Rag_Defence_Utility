@@ -168,6 +168,149 @@ Answer:"""
             "model": self.model_path,
             "latency_ms": latency_ms
         }
+
+    def generate_many(
+        self,
+        items: List[Dict[str, Any]],
+        system_prompt: Optional[str] = None,
+    ) -> List[dict]:
+        """
+        Batched generation for multiple (question, contexts) items.
+
+        Each item must include:
+          - question: str
+          - contexts: List[str]
+        """
+        if not items:
+            return []
+
+        if system_prompt is None:
+            system_prompt = (
+                "You are a helpful assistant. Answer the question based on the provided context. "
+                "If the context doesn't contain enough information to answer, say so clearly. "
+                "Be concise and accurate."
+            )
+
+        formatted_prompts: List[str] = []
+        for item in items:
+            question = item.get("question", "")
+            contexts = item.get("contexts", []) or []
+
+            if not contexts:
+                context_str = "No relevant context was found in the knowledge base."
+            else:
+                context_str = "\n\n".join([f"Context {i+1}:\n{ctx}" for i, ctx in enumerate(contexts)])
+
+            user_prompt = f"""Context:
+{context_str}
+
+Question: {question}
+
+Answer:"""
+
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
+
+            try:
+                formatted_prompt = self.llm.tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+            except Exception as e:
+                logger.warning(f"Chat template failed, using simple concatenation: {e}")
+                formatted_prompt = f"{system_prompt}\n\n{user_prompt}"
+
+            formatted_prompts.append(formatted_prompt)
+
+        inputs = self.llm.tokenizer(
+            formatted_prompts,
+            return_tensors="pt",
+            padding=True,
+        ).to(self.llm.model.device)
+
+        gen_kwargs: Dict[str, Any] = {
+            "attention_mask": inputs["attention_mask"],
+            "pad_token_id": self.llm.tokenizer.eos_token_id,
+            "do_sample": self.temperature > 0,
+            "temperature": self.temperature if self.temperature > 0 else None,
+            "use_cache": True,
+        }
+        if self.defense_manager is not None:
+            gen_kwargs.update(self.defense_manager.get_hf_extra_generation_kwargs())
+
+        start_time = time.time()
+        with torch.no_grad():
+            outputs = self.llm.model.generate(inputs["input_ids"], **gen_kwargs)
+        latency_ms_total = (time.time() - start_time) * 1000
+
+        prompt_len = inputs["input_ids"].shape[1]
+        generated_ids = outputs[:, prompt_len:]
+        answers: List[str] = self.llm.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+
+        per_item_latency = latency_ms_total / max(1, len(items))
+        return [
+            {"answer": (a or "").strip(), "model": self.model_path, "latency_ms": per_item_latency}
+            for a in answers
+        ]
+
+    def generate_batch_formatted(
+        self,
+        prompts: List[str],
+        *,
+        max_new_tokens: int = 512,
+    ) -> List[str]:
+        """
+        Decode-only continuation from fully formatted prompt strings (same shape as vLLM batch).
+
+        Used by the sequential evaluator when PAD forces Hugging Face generation so logits
+        processors can run, without loading vLLM first.
+        """
+        if not prompts:
+            return []
+
+        inputs = self.llm.tokenizer(
+            prompts,
+            return_tensors="pt",
+            padding=True,
+        ).to(self.llm.model.device)
+
+        gen_kwargs: Dict[str, Any] = {
+            "attention_mask": inputs["attention_mask"],
+            "pad_token_id": self.llm.tokenizer.eos_token_id,
+            "max_new_tokens": int(max_new_tokens),
+            "do_sample": self.temperature > 0,
+            "temperature": self.temperature if self.temperature > 0 else None,
+            "use_cache": True,
+        }
+        if self.defense_manager is not None:
+            gen_kwargs.update(self.defense_manager.get_hf_extra_generation_kwargs())
+
+        with torch.no_grad():
+            outputs = self.llm.model.generate(inputs["input_ids"], **gen_kwargs)
+
+        prompt_len = inputs["input_ids"].shape[1]
+        generated_ids = outputs[:, prompt_len:]
+        return [
+            (t or "").strip()
+            for t in self.llm.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+        ]
+
+    def close(self) -> None:
+        """Release HF weights to free GPU memory (e.g. before loading vLLM for judging)."""
+        try:
+            if getattr(self, "llm", None) is not None:
+                del self.llm
+                self.llm = None
+            import gc
+
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception as e:
+            logger.warning(f"HuggingFaceGenerator.close: {e}")
     
     def generate_simple(self, prompt: str) -> str:
         """Simple generation without context (for testing)."""
@@ -266,7 +409,7 @@ Answer:"""
         return response["message"]["content"]
 
 
-def create_generator(config: Dict[str, Any], defense_manager=None):
+def create_generator(config: Dict[str, Any], defense_manager=None, shared_llm=None):
     """
     Factory function to create appropriate generator based on config.
     Auto-migrates legacy configs and supports model sharing with AV defense.
@@ -299,7 +442,8 @@ def create_generator(config: Dict[str, Any], defense_manager=None):
             temperature=temperature,
             gpu_memory_utilization=gpu_memory_utilization,
             tensor_parallel_size=tensor_parallel_size,
-            max_model_len=max_model_len
+            max_model_len=max_model_len,
+            shared_llm=shared_llm,
         )
         
     elif provider == "ollama":

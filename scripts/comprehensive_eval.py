@@ -7,7 +7,7 @@ No CLI arguments are needed - everything is driven by the config file.
 Workflow:
 1. Load config/config.yaml
 2. Create timestamped results folder and copy config
-3. Clear Vector DB for clean state
+3. Optionally clear Vector DB (data.clear_chroma_before_run; default false for ingest reuse)
 4. Ingest data based on config
 5. Run evaluation (ADO-enabled or ADO-disabled path)
 6. Save results
@@ -19,6 +19,7 @@ Usage:
 import os
 import sys
 import json
+import copy
 import argparse
 import random
 import shutil
@@ -29,7 +30,13 @@ from typing import List, Dict, Tuple, Any, Optional
 from dataclasses import dataclass, asdict, field
 
 # Add project root to path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, _PROJECT_ROOT)
+
+# FlashInfer JIT calls `ninja`; pip puts it in env/bin, often absent from PATH for worker subprocesses.
+_venv_bin = os.path.join(_PROJECT_ROOT, "env", "bin")
+if os.path.isdir(_venv_bin):
+    os.environ["PATH"] = _venv_bin + os.pathsep + os.environ.get("PATH", "")
 
 import yaml
 
@@ -46,6 +53,17 @@ logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.ERROR)
 logging.getLogger("chromadb").setLevel(logging.WARNING)
 logging.getLogger("transformers").setLevel(logging.WARNING)
+
+
+def _privacy_aware_decoding_enabled(config: Dict[str, Any]) -> bool:
+    """True if PAD defense is enabled in config (requires HF generation)."""
+    for d in config.get("defenses") or []:
+        if not isinstance(d, dict):
+            continue
+        raw = d.get("name")
+        if raw in ("privacy_aware_decoding", "pad") and d.get("enabled", False):
+            return True
+    return False
 
 
 # =============================================================================
@@ -103,6 +121,7 @@ class EvaluationMetrics:
     # Performance
     avg_latency_ms: float = 0.0
     total_queries: int = 0
+    extra: Dict[str, Any] = field(default_factory=dict)
     
     # ADO metrics
     ado_enabled: bool = False
@@ -120,9 +139,36 @@ class ConfigDrivenEvaluator:
     Comprehensive evaluator driven entirely by config.yaml.
     """
     
-    def __init__(self, config_path: str = "config/config.yaml"):
+    def __init__(self, config_path: str = "config/config.yaml", phase: str = "final"):
         self.config_path = config_path
         self.config = load_config(config_path)
+        self.phase = phase
+        self._pad_deferred_vllm = _privacy_aware_decoding_enabled(self.config)
+
+        # Optional offline mode: after caches are populated, set system.offline=true
+        # to avoid any network calls for HF datasets/transformers.
+        try:
+            from src.core.offline import apply_offline_env
+            apply_offline_env(self.config)
+        except Exception:
+            pass
+
+        # 2-phase schedule override (utility experiments):
+        # - smoke: force test_size=20
+        # - final: force test_size=200 (unless config explicitly sets something else)
+        if self.phase == "smoke":
+            self.config.setdefault("data", {})
+            self.config["data"]["test_size"] = 20
+            logger.info("Phase=smoke: overriding data.test_size=20")
+        elif self.phase == "final":
+            self.config.setdefault("data", {})
+            self.config["data"]["test_size"] = int(self.config["data"].get("test_size", 200) or 200)
+            if self.config["data"]["test_size"] != 200:
+                logger.info(f"Phase=final: keeping config data.test_size={self.config['data']['test_size']}")
+            else:
+                logger.info("Phase=final: data.test_size=200")
+        else:
+            logger.warning(f"Unknown phase '{self.phase}', proceeding without test_size override.")
         
         # Create timestamped results folder
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -139,19 +185,144 @@ class ConfigDrivenEvaluator:
         logger.info(f"Config copied to: {config_copy_path}")
         
         # Initialize DeepEval evaluator
+        self._shared_vllm_llm = None
+        self._judge_llm_spec = None
         self.deepeval_evaluator = None
         try:
             from src.evaluation.evaluator import RAGEvaluator
-            judge_llm = self.config.get("system", {}).get("judge_llm", "llama3")
-            self.deepeval_evaluator = RAGEvaluator(llm_model=f"ollama/{judge_llm}")
+            # Judge LLM can be:
+            # - "ollama/<model>" (default)
+            # - "vllm/<hf_model_path>" (fast local batching)
+            judge_llm = self.config.get("system", {}).get("judge_llm", "ollama/llama3")
+            if "/" not in str(judge_llm):
+                judge_llm = f"ollama/{judge_llm}"
+            self._judge_llm_spec = str(judge_llm)
+
+            if self._pad_deferred_vllm:
+                logger.info(
+                    "PAD enabled: deferring vLLM until DeepEval; generation will use Hugging Face "
+                    "(PAD requires logits hooks). vLLM loads only if judge_llm is vllm/... and DeepEval runs."
+                )
+
+            # Shared vLLM instance optimization:
+            # If BOTH judge and generator use vLLM with the same model_path, reuse one vllm.LLM.
+            # Skip at startup when PAD is on (generation must be HF first).
+            gen_llm_cfg = self.config.get("system", {}).get("llm", {}) or {}
+            gen_provider = str(gen_llm_cfg.get("provider", "")).lower()
+            gen_model_path = str(gen_llm_cfg.get("model_path", "")).strip()
+            if (
+                self._judge_llm_spec.startswith("vllm/")
+                and gen_provider == "vllm"
+                and not self._pad_deferred_vllm
+            ):
+                judge_model_path = self._judge_llm_spec[len("vllm/") :].strip()
+                if judge_model_path and gen_model_path and judge_model_path == gen_model_path:
+                    try:
+                        self._shared_vllm_llm = self._instantiate_shared_vllm_engine()
+                        if self._shared_vllm_llm is not None:
+                            logger.info("Using a shared vLLM engine for generation + DeepEval judging.")
+                    except Exception as e:
+                        logger.warning(f"Could not initialize shared vLLM engine (falling back to separate loads): {e}")
+
+            self.deepeval_evaluator = RAGEvaluator(
+                llm_model=self._judge_llm_spec,
+                shared_vllm_llm=self._shared_vllm_llm,
+            )
             logger.info("DeepEval evaluator initialized")
         except Exception as e:
             logger.warning(f"Could not initialize DeepEval: {e}")
         
         self.rag: Optional[ModularRAG] = None
+
+    def _instantiate_shared_vllm_engine(self):
+        """Create one ``vllm.LLM`` using ``system.llm`` settings (shared gen+judge or judge-only)."""
+        from vllm import LLM
+        import torch
+
+        gen_llm_cfg = self.config.get("system", {}).get("llm", {}) or {}
+        model_path = str(gen_llm_cfg.get("model_path", "")).strip()
+        if not model_path:
+            logger.warning("Cannot load vLLM: system.llm.model_path is empty.")
+            return None
+
+        venv_bin = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "env", "bin"))
+        if os.path.isdir(venv_bin) and venv_bin not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = f"{venv_bin}:{os.environ.get('PATH', '')}"
+
+        gpu_mem_util = float(gen_llm_cfg.get("gpu_memory_utilization", 0.85))
+        try:
+            if torch.cuda.is_available():
+                free_bytes, total_bytes = torch.cuda.mem_get_info()
+                if total_bytes > 0:
+                    safe_util = max(0.02, (free_bytes / total_bytes) * 0.90)
+                    if gpu_mem_util > safe_util:
+                        logger.warning(
+                            "Clamping vLLM gpu_memory_utilization from %.3f to %.3f based on free GPU memory.",
+                            gpu_mem_util,
+                            safe_util,
+                        )
+                        gpu_mem_util = safe_util
+        except Exception:
+            pass
+        tp = int(gen_llm_cfg.get("tensor_parallel_size", 1))
+        max_len = gen_llm_cfg.get("max_model_len", 4096)
+        # DeepEval Faithfulness: prompt (full retrieval) + large structured completion
+        # must fit under max_model_len. 8192 still truncates when truths JSON is long.
+        _deepeval_on = not bool(self.config.get("evaluation", {}).get("skip_deepeval", False))
+        _judge_vllm = str(self.config.get("system", {}).get("judge_llm", "")).startswith("vllm/")
+        if (
+            _deepeval_on
+            and _judge_vllm
+            and max_len is not None
+            and int(max_len) < 16384
+        ):
+            logger.warning(
+                "system.llm.max_model_len=%s is low for DeepEval+vLLM (Faithfulness JSON "
+                "needs prompt+completion headroom). Raising to 16384 for this run.",
+                max_len,
+            )
+            max_len = 16384
+        hf_home = os.environ.get("HF_HOME")
+        return LLM(
+            model=model_path,
+            gpu_memory_utilization=gpu_mem_util,
+            tensor_parallel_size=tp,
+            max_model_len=int(max_len) if max_len is not None else None,
+            trust_remote_code=True,
+            download_dir=os.path.join(hf_home, "hub") if hf_home else None,
+        )
+
+    def _ensure_vllm_engine_for_judge(self) -> None:
+        """Load vLLM after PAD/HF generation so DeepEval can use ``vllm/...`` judge."""
+        if not getattr(self, "_judge_llm_spec", "") or not str(self._judge_llm_spec).startswith("vllm/"):
+            return
+        if getattr(self, "_shared_vllm_llm", None) is not None:
+            return
+        if not self.deepeval_evaluator:
+            return
+        logger.info("Loading vLLM for DeepEval judge (PAD deferred or judge-only path)...")
+        try:
+            self._shared_vllm_llm = self._instantiate_shared_vllm_engine()
+            if self._shared_vllm_llm is not None:
+                self.deepeval_evaluator.shared_vllm_llm = self._shared_vllm_llm
+        except Exception as e:
+            logger.error(f"Failed to load vLLM for judge: {e}")
         
     def clear_vector_db(self):
-        """Clear the vector database for a clean start."""
+        """
+        Optionally wipe Chroma persistence root.
+
+        Default ``data.clear_chroma_before_run`` is False so namespaced corpora under
+        ``paths.chroma_db/<dataset>_seed<seed>/`` can be reused (ingest-once behavior).
+        Set ``clear_chroma_before_run: true`` for a full wipe.
+        """
+        data_cfg = self.config.get("data") or {}
+        if not bool(data_cfg.get("clear_chroma_before_run", False)):
+            logger.info(
+                "Skipping vector DB clear (data.clear_chroma_before_run=false). "
+                "Existing ingested collections are reused when present."
+            )
+            return
         chroma_path = self.config["paths"]["chroma_db"]
         if os.path.exists(chroma_path):
             shutil.rmtree(chroma_path)
@@ -172,6 +343,20 @@ class ConfigDrivenEvaluator:
         # For the ADO-disabled 3-stage pipeline, we must not initialize the
         # generator here; vLLM should only load in stage 2.
         self.rag = ModularRAG(config_path=self.config_path, initialize_generator=False)
+
+        # If we created a shared vLLM engine, inject it into the generator so the
+        # pipeline doesn't load another vLLM instance.
+        try:
+            if self._shared_vllm_llm is not None:
+                from src.core.generation import create_generator
+
+                self.rag.generator = create_generator(
+                    self.config,
+                    defense_manager=getattr(self.rag, "defense_manager", None),
+                    shared_llm=self._shared_vllm_llm,
+                )
+        except Exception as e:
+            logger.warning(f"Could not inject shared vLLM generator (continuing): {e}")
         return self.rag
     
     def ingest_data(self):
@@ -306,9 +491,13 @@ class ConfigDrivenEvaluator:
         logger.info("RUNNING SEQUENTIAL EVALUATION (ADO DISABLED) - 3-STAGE HARVEST→CLEANUP→GENERATE")
         logger.info("=" * 70)
         
+        stage_breakdown_ms: Dict[str, float] = {}
+
         # STAGE 1: HARVEST
         logger.info("\n[STAGE 1] HARVESTING: Extracting all prompts from dataset...")
+        t_stage = time.perf_counter()
         harvest_data = self._harvest_all_queries()
+        stage_breakdown_ms["stage1_harvest_ms"] = (time.perf_counter() - t_stage) * 1000
         all_metadata = harvest_data["metadata"]  # List of query metadata dicts
         all_prompts = harvest_data["prompts"]      # List of formatted prompt strings
         
@@ -319,18 +508,34 @@ class ConfigDrivenEvaluator:
         
         # STAGE 1.5: CLEANUP
         logger.info("\n[STAGE 1.5] CLEANUP: Freeing embeddings and vector store...")
+        t_stage = time.perf_counter()
         self._cleanup_models()
+        stage_breakdown_ms["stage1_5_cleanup_ms"] = (time.perf_counter() - t_stage) * 1000
         
         # STAGE 2: GENERATE
-        logger.info("\n[STAGE 2] GENERATING: Batch-generating via vLLM...")
+        if getattr(self, "_pad_deferred_vllm", False):
+            logger.info("\n[STAGE 2] GENERATING: Batch-generating via Hugging Face (PAD logits)...")
+        else:
+            logger.info("\n[STAGE 2] GENERATING: Batch-generating via vLLM...")
+        t_stage = time.perf_counter()
         answers, per_prompt_latency_ms = self._generate_batch_answers(all_prompts)
+        stage_breakdown_ms["stage2_generate_ms"] = (time.perf_counter() - t_stage) * 1000
         
         # STAGE 3: MAP RESULTS
         logger.info("\n[STAGE 3] MAPPING: Tying results back to query metadata...")
+        t_stage = time.perf_counter()
         all_results, metrics = self._map_results_to_metadata(all_metadata, answers, per_prompt_latency_ms)
+        stage_breakdown_ms["stage3_map_ms"] = (time.perf_counter() - t_stage) * 1000
         
         # Compute DeepEval metrics
         metrics = self._compute_deepeval_metrics(all_results, metrics)
+
+        # Attach stage breakdown for latency tracking (even when DeepEval is skipped).
+        try:
+            metrics.extra = getattr(metrics, "extra", {})
+            metrics.extra["stage_breakdown_ms"] = stage_breakdown_ms
+        except Exception:
+            pass
         
         # Save results
         self._save_results(all_results, metrics, "sequential_3stage")
@@ -635,6 +840,9 @@ class ConfigDrivenEvaluator:
         Returns:
             Tuple of (answers, per_prompt_latency_ms)
         """
+        if getattr(self, "_pad_deferred_vllm", False):
+            return self._generate_batch_answers_hf_pad(prompts)
+
         from src.core.vllm_model import VLLMGenerator
         
         llm_config = self.config.get("system", {}).get("llm", {})
@@ -643,11 +851,17 @@ class ConfigDrivenEvaluator:
         temperature = llm_config.get("temperature", gen_config.get("temperature", 0.0))
         
         logger.info(f"  Initializing vLLM with model: {model_path}")
+        # Reuse shared vLLM engine if available (prevents OOM from double-loading).
         generator = VLLMGenerator(
             model_path=model_path,
             temperature=temperature,
-            gpu_memory_utilization=llm_config.get("gpu_memory_utilization", gen_config.get("gpu_memory_utilization", 0.9)),
-            tensor_parallel_size=llm_config.get("tensor_parallel_size", gen_config.get("tensor_parallel_size", 1))
+            gpu_memory_utilization=llm_config.get(
+                "gpu_memory_utilization", gen_config.get("gpu_memory_utilization", 0.9)
+            ),
+            tensor_parallel_size=llm_config.get(
+                "tensor_parallel_size", gen_config.get("tensor_parallel_size", 1)
+            ),
+            shared_llm=getattr(self, "_shared_vllm_llm", None),
         )
         
         logger.info(f"  Batch generating {len(prompts)} answers...")
@@ -656,9 +870,38 @@ class ConfigDrivenEvaluator:
         elapsed_ms = (time.time() - start) * 1000
         per_prompt_latency_ms = (elapsed_ms / len(prompts)) if prompts else 0.0
 
-        # Ensure vLLM is explicitly torn down after stage 2.
-        generator.close()
+        # Ensure vLLM is explicitly torn down after stage 2 only if we created it.
+        if getattr(self, "_shared_vllm_llm", None) is None:
+            generator.close()
         
+        return answers, per_prompt_latency_ms
+
+    def _generate_batch_answers_hf_pad(self, prompts: List[str]) -> Tuple[List[str], float]:
+        """PAD path: Hugging Face batched generation, then release GPU before optional vLLM judge."""
+        from src.core.generation import create_generator
+
+        gen_config = self.config.get("generation", {}) or {}
+        max_new_tokens = int(gen_config.get("max_new_tokens", 512))
+
+        cfg = copy.deepcopy(self.config)
+        cfg.setdefault("system", {}).setdefault("llm", {})
+        cfg["system"]["llm"]["provider"] = "huggingface"
+
+        dm = self.rag.defense_manager if self.rag else None
+        generator = create_generator(cfg, defense_manager=dm, shared_llm=None)
+
+        mp = cfg["system"]["llm"].get("model_path", "?")
+        logger.info(f"  Initializing Hugging Face generator for PAD with model: {mp}")
+
+        logger.info(f"  Batch generating {len(prompts)} answers (HF + PAD)...")
+        start = time.time()
+        answers = generator.generate_batch_formatted(prompts, max_new_tokens=max_new_tokens)
+        elapsed_ms = (time.time() - start) * 1000
+        per_prompt_latency_ms = (elapsed_ms / len(prompts)) if prompts else 0.0
+
+        generator.close()
+        logger.info("  Released Hugging Face weights before DeepEval / judge load.")
+
         return answers, per_prompt_latency_ms
     
     # =========================================================================
@@ -1311,11 +1554,13 @@ class ConfigDrivenEvaluator:
         
         if self._should_run_deepeval():
             logger.info(f"Running DeepEval on {len(eval_data)} benign queries...")
+            self._ensure_vllm_engine_for_judge()
             
             try:
                 max_concurrent = self.config.get("evaluation", {}).get("deepeval_max_concurrent", 5)
+                metric_subset = self.config.get("evaluation", {}).get("deepeval_metrics", None)
                 deepeval_results = self.deepeval_evaluator.evaluate_with_deepeval(
-                    eval_data, max_concurrent=max_concurrent
+                    eval_data, metrics=metric_subset, max_concurrent=max_concurrent
                 )
                 
                 metrics.answer_relevancy = deepeval_results.get("deepeval_answer_relevancy", 
@@ -1368,13 +1613,19 @@ class ConfigDrivenEvaluator:
         print(f"  Avg Latency: {metrics.avg_latency_ms:.0f}ms")
         
         print(f"\n  --- UTILITY METRICS (DeepEval) ---")
-        if metrics.answer_relevancy > 0 or metrics.faithfulness > 0:
+        deepeval_ran = self._should_run_deepeval() and self.deepeval_evaluator is not None
+        if deepeval_ran:
             print(f"  Answer Relevancy:     {metrics.answer_relevancy:.3f}")
             print(f"  Faithfulness:         {metrics.faithfulness:.3f}")
             print(f"  Contextual Relevancy: {metrics.contextual_relevancy:.3f}")
             print(f"  Contextual Recall:    {metrics.contextual_recall:.3f}")
+            if (metrics.answer_relevancy == 0.0 and metrics.faithfulness == 0.0
+                    and metrics.contextual_relevancy == 0.0 and metrics.contextual_recall == 0.0):
+                print(f"  WARNING: all metrics are 0.0 — check logs for DeepEval failures")
+        elif not self._should_run_deepeval():
+            print(f"  (Skipped — evaluation.skip_deepeval=true)")
         else:
-            print(f"  (No DeepEval metrics computed)")
+            print(f"  (DeepEval evaluator not initialized — check startup logs)")
         
         print(f"\n  --- ATTACK METRICS ---")
         if metrics.poisoning_total > 0:
@@ -1404,23 +1655,31 @@ class ConfigDrivenEvaluator:
         """Main execution method."""
         logger.info("Starting Config-Driven Comprehensive Evaluation")
         logger.info(f"Config: {self.config_path}")
-        
-        # Step 1: Clear Vector DB
-        self.clear_vector_db()
-        
-        # Step 2: Setup RAG and Ingest
-        self.setup_rag()
-        if not self.ingest_data():
-            logger.error("Ingestion failed, aborting evaluation.")
-            return None
-        
-        # Step 3: Run evaluation based on ADO setting
-        ado_enabled = self.config.get("ado", {}).get("enabled", False)
-        
-        if ado_enabled:
-            return self.run_mixed_evaluation()
-        else:
-            return self.run_sequential_evaluation()
+        try:
+            # Step 1: Clear Vector DB
+            self.clear_vector_db()
+            
+            # Step 2: Setup RAG and Ingest
+            self.setup_rag()
+            if not self.ingest_data():
+                logger.error("Ingestion failed, aborting evaluation.")
+                return None
+            
+            # Step 3: Run evaluation based on ADO setting
+            ado_enabled = self.config.get("ado", {}).get("enabled", False)
+            
+            if ado_enabled:
+                return self.run_mixed_evaluation()
+            else:
+                return self.run_sequential_evaluation()
+        finally:
+            # Best-effort cleanup for shared vLLM engine to avoid orphan EngineCore.
+            try:
+                llm = getattr(self, "_shared_vllm_llm", None)
+                if llm is not None and hasattr(llm, "shutdown"):
+                    llm.shutdown()
+            except Exception:
+                pass
 
 
 # =============================================================================
@@ -1435,9 +1694,15 @@ def main():
         default="config/config.yaml",
         help="Path to YAML config file (default: config/config.yaml)",
     )
+    parser.add_argument(
+        "--phase",
+        choices=["smoke", "final"],
+        default="final",
+        help="2-phase schedule: smoke (test_size=20) or final (test_size=200)",
+    )
     args = parser.parse_args()
 
-    evaluator = ConfigDrivenEvaluator(config_path=args.config)
+    evaluator = ConfigDrivenEvaluator(config_path=args.config, phase=args.phase)
     results = evaluator.run()
     
     if results:

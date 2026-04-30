@@ -9,6 +9,7 @@ Paper: https://arxiv.org/abs/2508.03098
 """
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict
 
 import numpy as np
@@ -17,6 +18,8 @@ import torch.nn.functional as F
 from transformers import LogitsProcessor
 
 from .base import BaseDefense
+
+logger = logging.getLogger(__name__)
 
 
 class RDPAccountant:
@@ -179,6 +182,8 @@ class PADDefense(BaseDefense):
     for logits-level hooks.
     """
 
+    CANONICAL_NAME = "privacy_aware_decoding"
+
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         self.name = config.get("name", self.CANONICAL_NAME)
@@ -193,6 +198,10 @@ class PADDefense(BaseDefense):
         self.noise_type = str(config.get("noise_type", "adaptive")).lower()
         self.static_noise_scale = float(config.get("static_noise_scale", 0.1))
         self.candidate_multiplier = int(config.get("candidate_multiplier", 1))
+        logger.info(
+            "[PAD Defense] Initialized (%s noise); logits hooks apply only with HF generator.",
+            self.noise_type,
+        )
 
     def build_logits_processor(self):
         """Fresh processor per generation call (per-completion accounting)."""

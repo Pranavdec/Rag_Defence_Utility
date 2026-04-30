@@ -1,0 +1,112 @@
+system:
+  embedding_model: all-MiniLM-L6-v2
+  llm:
+    # PAD requires HF logits hooks, so default to HuggingFace backend.
+    # You can switch to vllm for PAD-disabled runs later.
+    provider: huggingface
+    model_path: meta-llama/Llama-3.1-8B-Instruct
+    device: auto
+    temperature: 0.0
+    # Kept for compatibility with other generators (e.g. ollama/vllm).
+    model_name: llama3
+    tensor_parallel_size: 1
+    gpu_memory_utilization: 0.90
+    max_model_len: 16384
+  judge_llm: llama3
+
+paths:
+  chroma_db: data/chroma_db
+  results: data/results
+  cache: data/raw
+  # Used by ADO trust persistence. Kept for completeness (ADO is disabled by default).
+  user_data: data/users
+
+data:
+  # If false (default), existing Chroma namespaced dirs are kept so ingest-once reuse works.
+  # Set true only when you want a full wipe under paths.chroma_db before each run.
+  clear_chroma_before_run: false
+  # For Experiment 1/2 runners this should be overwritten per run.
+  dataset: nq
+  # Amount of gold QA pairs to ingest (distractors should be handled via the distractor ingestion step + corpus-clone step).
+  ingestion_size: 1000
+  ingestion_seed: 42
+  # Utility-only evaluation query budget.
+  test_size: 200
+  test_seed: 42
+
+evaluation:
+  skip_deepeval: false
+  deepeval_max_concurrent: 5
+
+retrieval:
+  top_k: 5
+  chunk_size: 512
+  chunk_overlap: 50
+
+defenses:
+  - name: differential_privacy
+    # Enabled flag is expected to be toggled by the experiment runner.
+    enabled: false
+    # Experiment fixed hyperparameters:
+    # - method: dp_pure for the base utility paradox experiments
+    # - epsilon/delta as specified
+    method: dp_pure
+    epsilon: 5.0
+    delta: 1e-3
+    candidate_multiplier: 3
+
+  - name: trustrag
+    enabled: false
+    similarity_threshold: 0.88
+    rouge_threshold: 0.25
+    candidate_multiplier: 3
+
+  - name: privacy_aware_decoding
+    enabled: false
+    # PAD fixed hyperparameters (adaptive mode).
+    noise_type: adaptive
+    epsilon: 0.2
+    alpha: 10.0
+    delta: 1e-5
+    enable_screening: true
+    enable_calibration: true
+    noise_amplification: 3.0
+    min_sensitivity: 0.4
+    static_noise_scale: 0.1
+    candidate_multiplier: 3
+
+attack:
+  mba:
+    enabled: false
+    M: 5
+    gamma: 0.35
+    num_members: 30
+    num_non_members: 20
+    device: auto
+    proxy_model: gpt2-xl
+    enable_spelling_correction: false
+    max_document_words: 200
+    seed: 1235213
+
+  poisoned_rag:
+    enabled: false
+    poisoning_rate: 10
+    num_targets: 50
+    seed: 42
+    target_start_index: 0
+    diversity_level: true
+
+  ikea:
+    enabled: false
+    topic: ""   # empty → inferred from data.dataset (see src/attacks/ikea.py)
+    n_rounds: 32
+    max_corpus_chunks: 500
+
+ado:
+  enabled: false
+  user_id: test_user_001
+  sentinel_model: llama3
+  strategist_model: llama3
+  strategist_mode: llm
+  trust_score_decay: 0.05
+

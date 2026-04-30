@@ -3,6 +3,7 @@ TriviaQA loader for smart indexing.
 Uses validation split - each row has question + entity_pages (gold passages) + answer.
 """
 from typing import List, Optional
+import os
 from datasets import load_dataset
 from .base_loader import BaseLoader, QAPair
 
@@ -17,9 +18,14 @@ class TriviaLoader(BaseLoader):
     def load_qa_pairs(self, limit: Optional[int] = None, seed: int = 42) -> List[QAPair]:
         """Load QA pairs from rc validation split."""
         self._log(f"Loading QA pairs (limit={limit}, seed={seed})...")
-        
-        ds = load_dataset("trivia_qa", "rc", split="validation",
-                          cache_dir=self.cache_dir)
+
+        ds = load_dataset(
+            "trivia_qa",
+            "rc",
+            split="validation",
+            cache_dir=self.cache_dir,
+            download_mode="reuse_dataset_if_exists",
+        )
                           
         # Shuffle deterministically
         ds = ds.shuffle(seed=seed)

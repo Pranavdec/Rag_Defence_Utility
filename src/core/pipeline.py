@@ -5,6 +5,7 @@ Handles ingestion and batch inference with result logging.
 import os
 import json
 import time
+from time import perf_counter
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 from dataclasses import asdict
@@ -18,10 +19,12 @@ from ..data_loaders.pubmed_loader import PubMedLoader
 from ..data_loaders.trivia_loader import TriviaLoader
 from .retrieval import VectorStore
 from .generation import create_generator
+from .retrieval_cache import RetrievalCache
 from ..defenses.manager import DefenseManager
 from .persistence import UserTrustManager
 from .sensing import MetricsCollector
 from .ado import Sentinel, Strategist
+from .offline import apply_offline_env, is_offline
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -48,6 +51,12 @@ def load_config(config_path: str = "config/config.yaml") -> dict:
         raise ValueError(
             f"Config missing required top-level sections {missing}: {config_path}"
         )
+
+    # Apply offline env early so downstream HF/datasets calls are local-only.
+    try:
+        apply_offline_env(config)
+    except Exception:
+        pass
 
     return config
 
@@ -94,11 +103,18 @@ class ModularRAG:
         self.chunk_size = self.config.get("retrieval", {}).get("chunk_size", self.config.get("ingestion", {}).get("chunk_size", 512))
         self.chunk_overlap = self.config.get("retrieval", {}).get("chunk_overlap", self.config.get("ingestion", {}).get("chunk_overlap", 50))
         
+        # Base directory for Chroma persistence. We will namespace per (dataset, ingestion_seed)
+        # inside ingest() so ingestion can be reused across runs.
         self.chroma_path = self.config["paths"]["chroma_db"]
+        self.chroma_path_root = self.chroma_path
         self.results_path = self.config["paths"]["results"]
         
         # Get embedding model from config
         self.embedding_model = self.config.get("system", {}).get("embedding_model", "all-MiniLM-L6-v2")
+
+        # Retrieval cache (speeds up repeated runs across defense configs/seeds)
+        cache_root = self.config.get("paths", {}).get("cache", "data/raw")
+        self.retrieval_cache = RetrievalCache(os.path.join(cache_root, "retrieval_cache"))
         
         # Ensure results directory exists
         os.makedirs(self.results_path, exist_ok=True)
@@ -181,10 +197,14 @@ class ModularRAG:
         # Load loader to get correct name
         loader = get_loader(dataset_name)
         
+        # Namespace the persist directory per (dataset, ingestion_seed) so we can
+        # ingest once and reuse across different evaluation test_seeds/configs.
+        persist_dir = os.path.join(self.chroma_path_root, f"{loader.name}_seed{seed}")
+
         # Initialize vector store for this dataset using loader.name
         self.vector_store = VectorStore(
             collection_name=loader.name,
-            persist_directory=self.chroma_path,
+            persist_directory=persist_dir,
             embedding_model=self.embedding_model
         )
         self.current_dataset = dataset_name
@@ -363,14 +383,40 @@ class ModularRAG:
             )
 
         
+        t0 = perf_counter()
+        breakdown: Dict[str, float] = {}
+
         # Defense Pre-Retrieval
+        s = perf_counter()
         query_text, fetch_k = self.defense_manager.apply_pre_retrieval(question, self.top_k)
+        breakdown["pre_retrieval_ms"] = (perf_counter() - s) * 1000
         
         # Determine if embeddings are needed (for TrustRAG defense or ADO metrics)
         need_embeddings = self.defense_manager.needs_embeddings or self.ado_enabled
         
-        # Retrieve
-        retrieved = self.vector_store.query(query_text, top_k=fetch_k, include_embeddings=need_embeddings)
+        # Retrieve (with cache)
+        s = perf_counter()
+        retrieved = None
+        if self.retrieval_cache is not None:
+            retrieved = self.retrieval_cache.get(
+                collection_name=self.vector_store.collection_name,
+                embedding_model=self.embedding_model,
+                query_text=query_text,
+                top_k=fetch_k,
+                include_embeddings=need_embeddings,
+            )
+        if retrieved is None:
+            retrieved = self.vector_store.query(query_text, top_k=fetch_k, include_embeddings=need_embeddings)
+            if self.retrieval_cache is not None:
+                self.retrieval_cache.put(
+                    collection_name=self.vector_store.collection_name,
+                    embedding_model=self.embedding_model,
+                    query_text=query_text,
+                    top_k=fetch_k,
+                    include_embeddings=need_embeddings,
+                    results=retrieved,
+                )
+        breakdown["retrieval_ms"] = (perf_counter() - s) * 1000
 
         # --- ADO STAGE 2: SENTINEL PHASE 2 - Post-retrieval analysis ---
         if self.ado_enabled:
@@ -415,7 +461,9 @@ class ModularRAG:
 
         
         # Defense Post-Retrieval (TrustRAG enabled if anomalies detected)
+        s = perf_counter()
         retrieved = self.defense_manager.apply_post_retrieval(retrieved, question)
+        breakdown["post_retrieval_ms"] = (perf_counter() - s) * 1000
         
         contexts = [r["content"] for r in retrieved]
         
@@ -424,13 +472,16 @@ class ModularRAG:
             logger.warning(f"⚠️ NO CONTEXTS after defense filtering (originally had {len(self.vector_store.query(question, top_k=fetch_k, include_embeddings=False))} docs). Generation will proceed without context.")
         
         # Defense Pre-Generation
+        s = perf_counter()
         sys_p, user_p, mod_contexts = self.defense_manager.apply_pre_generation(
             system_prompt="", # Default empty
             user_prompt=question,
             contexts=contexts
         )
+        breakdown["pre_generation_ms"] = (perf_counter() - s) * 1000
         
         # Generate
+        s = perf_counter()
         if self.generator is None:
             self.generator = create_generator(self.config, defense_manager=self.defense_manager)
         result = self.generator.generate(
@@ -438,9 +489,12 @@ class ModularRAG:
             contexts=mod_contexts,
             system_prompt=sys_p if sys_p else None
         )
+        breakdown["generation_ms"] = (perf_counter() - s) * 1000
         
         # Defense Post-Generation
+        s = perf_counter()
         result["answer"] = self.defense_manager.apply_post_generation(result["answer"])
+        breakdown["post_generation_ms"] = (perf_counter() - s) * 1000
         
         # --- ADO STAGE 3: Store metrics for next round ---
         if self.ado_enabled:
@@ -454,11 +508,14 @@ class ModularRAG:
             self.trust_manager.update_query_history(user_id, question, combined_metrics_for_storage)
             logger.debug(f"Stored query with pre+post metrics for user {user_id}")
         
+        breakdown["total_end_to_end_ms"] = (perf_counter() - t0) * 1000
         return {
             "question": question,
             "answer": result["answer"],
             "contexts": contexts,
-            "latency_ms": result["latency_ms"],
+            # Keep legacy latency_ms (generation-only) and add breakdown.
+            "latency_ms": result.get("latency_ms", 0.0),
+            "latency_breakdown_ms": breakdown,
             "model": result["model"],
             "ado_metadata": ado_metadata
         }
@@ -480,7 +537,26 @@ class ModularRAG:
         need_embeddings = self.defense_manager.needs_embeddings
         
         # Retrieve
-        retrieved = self.vector_store.query(query_text, top_k=fetch_k, include_embeddings=need_embeddings)
+        retrieved = None
+        if self.retrieval_cache is not None:
+            retrieved = self.retrieval_cache.get(
+                collection_name=self.vector_store.collection_name,
+                embedding_model=self.embedding_model,
+                query_text=query_text,
+                top_k=fetch_k,
+                include_embeddings=need_embeddings,
+            )
+        if retrieved is None:
+            retrieved = self.vector_store.query(query_text, top_k=fetch_k, include_embeddings=need_embeddings)
+            if self.retrieval_cache is not None:
+                self.retrieval_cache.put(
+                    collection_name=self.vector_store.collection_name,
+                    embedding_model=self.embedding_model,
+                    query_text=query_text,
+                    top_k=fetch_k,
+                    include_embeddings=need_embeddings,
+                    results=retrieved,
+                )
         
         # Defense Post-Retrieval
         retrieved = self.defense_manager.apply_post_retrieval(retrieved, question)

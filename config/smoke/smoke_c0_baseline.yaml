@@ -1,14 +1,18 @@
+# Smoke run 1 — Baseline (C0): no defenses, DeepEval ON
+# Validates: ingest → harvest → vLLM batch gen → four DeepEval metrics
+# Usage: python scripts/comprehensive_eval.py --config config/smoke/smoke_c0_baseline.yaml --phase smoke
+
 system:
   embedding_model: all-MiniLM-L6-v2
-  offline: false
   llm:
-    provider: vllm 
+    provider: vllm
     model_path: meta-llama/Llama-3.1-8B-Instruct
     device: auto
     temperature: 0.0
     model_name: llama3
     tensor_parallel_size: 1
     gpu_memory_utilization: 0.90
+    # DeepEval Faithfulness: long retrieval + multi-KB JSON needs headroom beyond 8k.
     max_model_len: 16384
   judge_llm: vllm/meta-llama/Llama-3.1-8B-Instruct
 
@@ -16,44 +20,50 @@ paths:
   chroma_db: data/chroma_db
   results: data/results
   cache: data/raw
+  user_data: data/users
+
 data:
-  dataset: triviaqa
-  ingestion_size: 100
+  clear_chroma_before_run: false
+  dataset: nq
+  ingestion_size: 1000
   ingestion_seed: 42
   test_size: 20
-  test_seed: 123
+  test_seed: 42
+
 evaluation:
-  skip_deepeval: true
-  deepeval_max_concurrent: 16
+  skip_deepeval: false
+  deepeval_max_concurrent: 1
+
 retrieval:
   top_k: 5
   chunk_size: 512
   chunk_overlap: 50
+
 defenses:
-- name: differential_privacy
-  enabled: false
-  method: dp_approx
-  epsilon: 3.0
-  delta: 0.01
-  candidate_multiplier: 3
-- name: trustrag
-  enabled: false
-  similarity_threshold: 0.88
-  rouge_threshold: 0.25
-  candidate_multiplier: 3
-# Privacy-Aware Decoding (PAD): decode-time logits noise; requires system.llm.provider huggingface or hf
-- name: privacy_aware_decoding
-  enabled: true
-  epsilon: 0.2
-  noise_amplification: 3.0
-  min_sensitivity: 0.4
-  noise_type: adaptive
-  enable_screening: true
-  enable_calibration: true
-  static_noise_scale: 0.1
-  alpha: 10.0
-  delta: 1.0e-5
-  candidate_multiplier: 1
+  - name: differential_privacy
+    enabled: false
+    method: dp_pure
+    epsilon: 5.0
+    delta: 1e-3
+    candidate_multiplier: 3
+  - name: trustrag
+    enabled: false
+    similarity_threshold: 0.88
+    rouge_threshold: 0.25
+    candidate_multiplier: 3
+  - name: privacy_aware_decoding
+    enabled: false
+    noise_type: adaptive
+    epsilon: 0.2
+    alpha: 10.0
+    delta: 1e-5
+    enable_screening: true
+    enable_calibration: true
+    noise_amplification: 3.0
+    min_sensitivity: 0.4
+    static_noise_scale: 0.1
+    candidate_multiplier: 3
+
 attack:
   mba:
     enabled: false
@@ -75,9 +85,10 @@ attack:
     diversity_level: true
   ikea:
     enabled: false
-    topic: ""   # empty → inferred from data.dataset (see src/attacks/ikea.py)
+    topic: ""
     n_rounds: 32
     max_corpus_chunks: 500
+
 ado:
   enabled: false
   user_id: test_user_001

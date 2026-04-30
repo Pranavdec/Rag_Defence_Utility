@@ -3,6 +3,7 @@ FinanceBench loader for smart indexing.
 Maps question, answer, and evidence fields to QAPair.
 """
 from typing import List, Optional, Any
+import os
 from datasets import load_dataset
 
 from .base_loader import BaseLoader, QAPair
@@ -48,6 +49,7 @@ class FinanceBenchLoader(BaseLoader):
             "PatronusAI/financebench",
             split="train",
             cache_dir=self.cache_dir,
+            download_mode="reuse_dataset_if_exists",
         )
 
         ds = ds.shuffle(seed=seed)

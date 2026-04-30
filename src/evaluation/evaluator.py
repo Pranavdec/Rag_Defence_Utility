@@ -51,6 +51,7 @@ except ImportError:
     logger.warning("DeepEval not available. Install with: pip install deepeval")
 
 from .custom_metrics import detect_refusal_simple
+from .judge_cache import JudgeCache
 
 os.environ["DEEPEVAL_PER_TASK_TIMEOUT_SECONDS_OVERRIDE"] = "600000"
 os.environ["DEEPEVAL_PER_ATTEMPT_TIMEOUT_SECONDS_OVERRIDE"] = "3000"
@@ -74,7 +75,9 @@ class RAGEvaluator:
     def __init__(
         self,
         llm_model: str = "ollama/llama3",
-        embedding_model: str = "ollama/nomic-embed-text"
+        embedding_model: str = "ollama/nomic-embed-text",
+        shared_vllm_llm=None,
+        cache_dir: str = "data/raw/judge_cache",
     ):
         """
         Initialize the evaluator.
@@ -85,6 +88,8 @@ class RAGEvaluator:
         """
         self.llm_model = llm_model
         self.embedding_model = embedding_model
+        self.shared_vllm_llm = shared_vllm_llm
+        self.judge_cache = JudgeCache(cache_dir)
         
         logger.info(f"RAGEvaluator initialized. RAGAS={RAGAS_AVAILABLE}, DeepEval={DEEPEVAL_AVAILABLE}")
     
@@ -245,7 +250,10 @@ class RAGEvaluator:
         max_concurrent: int = 5
     ) -> Dict[str, float]:
         """
-        Evaluate using DeepEval metrics with Ollama LLM.
+        Evaluate using DeepEval metrics with a configurable judge LLM.
+        Supported:
+        - ollama/<model>
+        - vllm/<hf_model_path>
         
         Args:
             results: List of result dicts
@@ -256,29 +264,80 @@ class RAGEvaluator:
             logger.warning("DeepEval not available, skipping evaluation")
             return {}
         
-        # Configure metrics
-        if metrics is None:
-            # Initialize Ollama model
-            # Extract model name from "ollama/llama3" -> "llama3"
-            model_name = self.llm_model.replace("ollama/", "")
+        # Configure judge model (required for both default and subset metric selection)
+        deepeval_model = None
+        model_spec = (self.llm_model or "").strip()
+        if model_spec.startswith("vllm/"):
+            model_path = model_spec[len("vllm/"):]
             try:
-                # Late import to avoid top-level dependency issues if not installed
+                from .vllm_judge import VLLMJudgeModel
+                # Faithfulness / multi-step metrics emit large structured JSON; 512 truncates
+                # mid-string and breaks trimAndLoadJson ("Unterminated string").
+                deepeval_model = VLLMJudgeModel(
+                    model=model_path,
+                    shared_llm=self.shared_vllm_llm,
+                    temperature=0.0,
+                    # Faithfulness truths/claims JSON can be large; must stay under
+                    # max_model_len minus prompt tokens (see comprehensive_eval floor).
+                    max_tokens=8192,
+                )
+            except Exception as e:
+                logger.error(f"Failed to initialize VLLMJudgeModel: {e}")
+                return {"deepeval_error": f"VLLM judge init failed: {e}"}
+        else:
+            model_name = model_spec.replace("ollama/", "")
+            try:
                 from deepeval.models import OllamaModel
                 deepeval_model = OllamaModel(model=model_name)
             except ImportError:
-                logger.warning("Could not import OllamaModel from deepeval.models. Falling back to default (might fail if API key missing).")
-                deepeval_model = self.llm_model # Fallback to string
+                logger.warning(
+                    "Could not import OllamaModel from deepeval.models. Falling back to default (might fail if API key missing)."
+                )
+                deepeval_model = self.llm_model
             except Exception as e:
                 logger.error(f"Failed to initialize OllamaModel: {e}")
                 return {"deepeval_error": f"Model init failed: {e}"}
 
-            metrics = [
-                AnswerRelevancyMetric(threshold=0, model=deepeval_model),
-                FaithfulnessMetric(threshold=0, model=deepeval_model),
-                ContextualRelevancyMetric(threshold=0, model=deepeval_model),
-                # ContextualPrecisionMetric(threshold=0, model=deepeval_model),
-                ContextualRecallMetric(threshold=0, model=deepeval_model)
-            ]
+        # Configure metrics:
+        # - metrics=None -> default 4 metrics
+        # - metrics=[\"contextual_recall\",\"faithfulness\"] -> subset for sweeps
+        if metrics is None or (metrics and all(isinstance(m, str) for m in metrics)):
+            metric_map = {
+                "answer_relevancy": AnswerRelevancyMetric,
+                "faithfulness": FaithfulnessMetric,
+                "contextual_relevancy": ContextualRelevancyMetric,
+                "contextual_recall": ContextualRecallMetric,
+            }
+            if metrics and all(isinstance(m, str) for m in metrics):
+                selected = [str(m).strip().lower() for m in metrics]
+                unknown = [m for m in selected if m not in metric_map]
+                if unknown:
+                    return {
+                        "deepeval_error": f"Unknown deepeval_metrics: {unknown}. Supported: {list(metric_map.keys())}"
+                    }
+                metric_classes = [metric_map[m] for m in selected]
+            else:
+                metric_classes = [
+                    AnswerRelevancyMetric,
+                    FaithfulnessMetric,
+                    ContextualRelevancyMetric,
+                    ContextualRecallMetric,
+                ]
+
+            metrics = []
+            for cls in metric_classes:
+                if cls is FaithfulnessMetric and model_spec.startswith("vllm/"):
+                    # Default None -> "comprehensive list" can explode JSON size and hit
+                    # max_tokens / max_model_len mid-string (invalid JSON).
+                    metrics.append(
+                        FaithfulnessMetric(
+                            threshold=0,
+                            model=deepeval_model,
+                            truths_extraction_limit=12,
+                        )
+                    )
+                else:
+                    metrics.append(cls(threshold=0, model=deepeval_model))
 
         test_cases = []
         for r in results:
@@ -291,80 +350,130 @@ class RAGEvaluator:
             test_cases.append(test_case)
             
         logger.info(f"Running DeepEval evaluation on {len(test_cases)} samples with {len(metrics)} metrics...")
-        logger.info(f"Using max_concurrent={max_concurrent} for parallel evaluation")
-        
-        try:
-            # Import AsyncConfig and ErrorConfig to control parallelization and error handling
-            from deepeval.evaluate.configs import AsyncConfig, ErrorConfig
-            
-            # Configure async settings to reduce parallelization
-            async_config = AsyncConfig(
-                run_async=True,
-                max_concurrent=max_concurrent,
-                throttle_value=0
-            )
-            
-            # Configure error handling to ignore errors and continue evaluation
-            error_config = ErrorConfig(ignore_errors=True)
-            
-            eval_results = deepeval_evaluate(
-                test_cases, 
-                metrics=metrics,
-                async_config=async_config,
-                error_config=error_config
-            )
-            
-            final_metrics = {}
-            metric_sums = {}
-            metric_counts = {}
-            
-            # DeepEval returns an EvaluationResult object with test_results attribute
-            # or the result might be directly iterable
-            test_results = eval_results
-            if hasattr(eval_results, 'test_results'):
-                test_results = eval_results.test_results
-            
-            # Extract scores from each test result
-            for result in test_results:
-                # Try to access metrics_data or metrics_metadata
-                metrics_list = None
-                if hasattr(result, 'metrics_data'):
-                    metrics_list = result.metrics_data
-                elif hasattr(result, 'metrics_metadata'):
-                    metrics_list = result.metrics_metadata
-                elif hasattr(result, 'metrics'):
-                    metrics_list = result.metrics
-                
-                if metrics_list:
-                    for metric_data in metrics_list:
-                        # Extract name and score
-                        name = getattr(metric_data, 'name', None) or getattr(metric_data, 'metric', None) or metric_data.__class__.__name__
-                        score = getattr(metric_data, 'score', None)
-                        
-                        if score is not None and name:
-                            if name not in metric_sums:
-                                metric_sums[name] = 0.0
-                                metric_counts[name] = 0
-                            
-                            metric_sums[name] += float(score)
-                            metric_counts[name] += 1
-            
-            # If still empty, try extracting from the metrics objects directly
-            if not metric_sums:
-                for metric in metrics:
-                    name = getattr(metric, 'name', metric.__class__.__name__)
-                    score = getattr(metric, 'score', None)
-                    if score is not None:
-                        metric_sums[name] = float(score)
-                        metric_counts[name] = 1
 
-            for name, total in metric_sums.items():
-                if metric_counts[name] > 0:
-                    key = f"deepeval_{name.lower().replace(' ', '_')}"
-                    final_metrics[key] = total / metric_counts[name]
-            
-            return final_metrics
-            
+        model_spec_for_conc = (self.llm_model or "").strip()
+        if model_spec_for_conc.startswith("vllm/") and max_concurrent > 1:
+            # vLLM in-process client isn't reliably thread-safe across many concurrent calls.
+            # Prefer stability; vLLM still runs fast per-call and caches help a lot.
+            logger.warning("Clamping DeepEval max_concurrent to 1 for vLLM judge stability.")
+            max_concurrent = 1
+        logger.info(f"Using max_concurrent={max_concurrent} for parallel evaluation")
+
+        # Cache-aware metric evaluation:
+        # DeepEval's `evaluate()` does not skip already-scored samples, so we
+        # compute per-sample scores ourselves and cache them on disk.
+        import asyncio
+
+        def _judge_name() -> str:
+            spec = (self.llm_model or "").strip()
+            if spec.startswith("vllm/"):
+                return spec[len("vllm/") :]
+            if spec.startswith("ollama/"):
+                return spec
+            return spec
+
+        async def _score_metric(metric, metric_name: str) -> float:
+            sem = asyncio.Semaphore(max(1, int(max_concurrent)))
+            scores: List[float] = []
+            failures: List[str] = []
+            judge_model = _judge_name()
+
+            async def _one(tc: LLMTestCase) -> None:
+                payload = {
+                    "judge_model": judge_model,
+                    "metric": metric_name,
+                    "question": tc.input,
+                    "expected_output": tc.expected_output,
+                    "actual_output": tc.actual_output,
+                    "retrieval_context": tc.retrieval_context,
+                }
+                cached = self.judge_cache.get(payload)
+                if cached is not None:
+                    scores.append(float(cached))
+                    return
+                async with sem:
+                    try:
+                        s = await metric.a_measure(
+                            tc, _show_indicator=False, _log_metric_to_confident=False
+                        )
+                        if isinstance(s, (int, float)):
+                            s = float(s)
+                            self.judge_cache.put(payload, s)
+                            scores.append(s)
+                        else:
+                            msg = f"non-numeric return ({type(s).__name__})"
+                            failures.append(msg)
+                            logger.debug(f"DeepEval {metric_name}: {msg} for input={tc.input[:60]!r}")
+                    except Exception as exc:
+                        import traceback
+                        tb = traceback.format_exc()
+                        failures.append(str(exc))
+                        logger.warning(
+                            f"DeepEval {metric_name}: a_measure failed for input={tc.input[:60]!r}: "
+                            f"{exc}\n{tb}"
+                        )
+
+            await asyncio.gather(*[_one(tc) for tc in test_cases])
+            if failures:
+                logger.warning(
+                    f"DeepEval {metric_name}: {len(failures)}/{len(test_cases)} samples failed. "
+                    f"First error: {failures[0]}"
+                )
+            return float(sum(scores) / len(scores)) if scores else 0.0
+
+        try:
+            async def _run_all() -> Dict[str, float]:
+                out: Dict[str, float] = {}
+                for metric in metrics:
+                    raw_name = getattr(metric, "name", None) or metric.__class__.__name__
+                    out_key = f"deepeval_{raw_name.lower().replace(' ', '_')}"
+                    out[out_key] = await _score_metric(metric, raw_name)
+                return out
+
+            return asyncio.run(_run_all())
+        except RuntimeError:
+            # Already in an event loop (e.g. notebooks) - do a blocking fallback.
+            final: Dict[str, float] = {}
+            judge_model = _judge_name()
+            for metric in metrics:
+                raw_name = getattr(metric, "name", None) or metric.__class__.__name__
+                out_key = f"deepeval_{raw_name.lower().replace(' ', '_')}"
+                vals: List[float] = []
+                for tc in test_cases:
+                    payload = {
+                        "judge_model": judge_model,
+                        "metric": raw_name,
+                        "question": tc.input,
+                        "expected_output": tc.expected_output,
+                        "actual_output": tc.actual_output,
+                        "retrieval_context": tc.retrieval_context,
+                    }
+                    cached = self.judge_cache.get(payload)
+                    if cached is not None:
+                        vals.append(float(cached))
+                        continue
+                    try:
+                        s = metric.measure(tc, _show_indicator=False, _log_metric_to_confident=False)
+                        if isinstance(s, (int, float)):
+                            s = float(s)
+                            self.judge_cache.put(payload, s)
+                            vals.append(s)
+                        else:
+                            logger.debug(
+                                f"DeepEval {raw_name}: non-numeric return ({type(s).__name__}) "
+                                f"for input={tc.input[:60]!r}"
+                            )
+                    except Exception as exc:
+                        import traceback
+                        logger.warning(
+                            f"DeepEval {raw_name}: measure failed for input={tc.input[:60]!r}: "
+                            f"{exc}\n{traceback.format_exc()}"
+                        )
+                        continue
+                if not vals:
+                    logger.warning(f"DeepEval {raw_name}: all {len(test_cases)} samples failed — score will be 0.0")
+                final[out_key] = float(sum(vals) / len(vals)) if vals else 0.0
+            return final
         except Exception as e:
             logger.error(f"DeepEval evaluation failed: {e}")
             import traceback

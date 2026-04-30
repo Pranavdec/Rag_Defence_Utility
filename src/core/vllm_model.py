@@ -17,7 +17,8 @@ class VLLMGenerator:
         temperature: float = 0.0,
         gpu_memory_utilization: float = 0.9,
         tensor_parallel_size: int = 1,
-        max_model_len: Optional[int] = None
+        max_model_len: Optional[int] = None,
+        shared_llm=None,
     ):
         """
         Initialize the vLLM generator.
@@ -49,7 +50,9 @@ class VLLMGenerator:
             if torch.cuda.is_available():
                 free_bytes, total_bytes = torch.cuda.mem_get_info()
                 if total_bytes > 0:
-                    safe_util = max(0.06, (free_bytes / total_bytes) * 0.90)
+                    # Allow very small KV cache when GPU is partially occupied.
+                    # (Useful when a prior process is still holding memory.)
+                    safe_util = max(0.02, (free_bytes / total_bytes) * 0.90)
                     if effective_gpu_memory_utilization > safe_util:
                         logger.warning(
                             "Clamping gpu_memory_utilization from %.3f to %.3f based on free GPU memory.",
@@ -61,19 +64,29 @@ class VLLMGenerator:
             pass
 
         import vllm
-        logger.info(f"Initializing vLLM engine for {model_path}...")
-        
-        # Build vllm engine args
-        engine_args = {
-            "model": model_path,
-            "gpu_memory_utilization": effective_gpu_memory_utilization,
-            "tensor_parallel_size": tensor_parallel_size,
-            "trust_remote_code": True,
-        }
-        if max_model_len:
-            engine_args["max_model_len"] = max_model_len
-            
-        self.llm = vllm.LLM(**engine_args)
+        if shared_llm is not None:
+            self.llm = shared_llm
+            logger.info("VLLMGenerator using shared vLLM LLM instance.")
+        else:
+            logger.info(f"Initializing vLLM engine for {model_path}...")
+
+            # Build vllm engine args
+            engine_args = {
+                "model": model_path,
+                "gpu_memory_utilization": effective_gpu_memory_utilization,
+                "tensor_parallel_size": tensor_parallel_size,
+                "trust_remote_code": True,
+            }
+            # Ensure vLLM uses the same local HF cache when configured.
+            # When offline env vars are set (HF_HUB_OFFLINE/TRANSFORMERS_OFFLINE),
+            # vLLM will not attempt network downloads and will resolve from cache.
+            hf_home = os.environ.get("HF_HOME")
+            if hf_home:
+                engine_args["download_dir"] = os.path.join(hf_home, "hub")
+            if max_model_len:
+                engine_args["max_model_len"] = max_model_len
+
+            self.llm = vllm.LLM(**engine_args)
         
         # Sampling parameters
         self.sampling_params = vllm.SamplingParams(

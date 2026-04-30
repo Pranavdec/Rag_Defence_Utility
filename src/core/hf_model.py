@@ -3,6 +3,7 @@ import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from huggingface_hub import login
 from .model import Model
+import os
 import re
 import string
 import logging
@@ -43,12 +44,14 @@ class Llama(Model):
         logger.info(f"Loading HF Model: {self.name} on {device}")
         
         try:
-            self.tokenizer = AutoTokenizer.from_pretrained(self.name)
+            offline = os.environ.get("TRANSFORMERS_OFFLINE") == "1"
+            self.tokenizer = AutoTokenizer.from_pretrained(self.name, local_files_only=offline)
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.name, 
                 torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
                 device_map="auto" if device=="cuda" else None,
-                attn_implementation="eager"
+                attn_implementation="eager",
+                local_files_only=offline,
             )
             if device != "cuda" and device is not None:
                 self.model.to(device)
