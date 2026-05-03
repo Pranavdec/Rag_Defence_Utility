@@ -1,0 +1,37 @@
+{
+  "pubmedqa": {
+    "raw_source_count": 1000,
+    "usable_count_after_filtering": 1000,
+    "gold_ingestion_unit_count": 3358,
+    "base_distractor_chunk_count": 50000,
+    "eligible_nonmember_count": "TBD"
+  },
+  "finder": {
+    "raw_source_count": 5703,
+    "usable_count_after_filtering": 5696,
+    "gold_ingestion_unit_count": 6113,
+    "base_distractor_chunk_count": 50000,
+    "field_mapping": {
+      "question": "text",
+      "evidence": "references",
+      "answer": "answer"
+    },
+    "effective_pool_after_holdouts": "TBD"
+  },
+  "nq": {
+    "raw_source_count": "NEED: Total queries from dpr-w100/natural-questions/dev",
+    "usable_count_after_filtering": "NEED: QA pairs after loader filtering",
+    "gold_ingestion_unit_count": "NEED: Total gold passages",
+    "base_distractor_doc_count": "NEED: ms_marco v1.1 train doc count",
+    "base_distractor_chunk_count": 50000,
+    "note": "Disk space full - unable to load ir_datasets"
+  },
+  "triviaqa": {
+    "raw_source_count": "NEED: Total rows in trivia_qa/rc/validation",
+    "usable_count_after_filtering": "NEED: Rows with entity_pages.wiki_context non-empty",
+    "gold_ingestion_unit_count": "NEED: Total gold wiki context passages",
+    "base_distractor_doc_count": "SKIPPED (Wikipedia 6M rows - user to provide)",
+    "base_distractor_chunk_count": 50000,
+    "eligible_nonmember_count": "TBD"
+  }
+}

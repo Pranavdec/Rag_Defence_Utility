@@ -1,0 +1,42 @@
+{
+  "nq": {
+    "raw_source_count": 6515,
+    "usable_count_after_filtering": 6515,
+    "gold_ingestion_unit_count": 51251,
+    "base_distractor_doc_count": 82326,
+    "base_distractor_chunk_count": 50000,
+    "eligible_nonmember_count": "N/A",
+    "notes": "Filtered by: relevance > 0 in qrels + requires gold docs available"
+  },
+  "triviaqa": {
+    "raw_source_count": 17944,
+    "usable_count_after_filtering": 16137,
+    "gold_ingestion_unit_count": 29167,
+    "base_distractor_doc_count": "PENDING",
+    "base_distractor_chunk_count": 50000,
+    "eligible_nonmember_count": 16137,
+    "notes": "Filtered by: non-empty entity_pages.wiki_context"
+  },
+  "pubmedqa": {
+    "raw_source_count": 1000,
+    "usable_count_after_filtering": 1000,
+    "gold_ingestion_unit_count": 1000,
+    "base_distractor_doc_count": "PENDING",
+    "base_distractor_chunk_count": 50000,
+    "eligible_nonmember_count": 1000,
+    "notes": "Filtered by: non-empty context field"
+  },
+  "finder": {
+    "raw_source_count": 5703,
+    "usable_count_after_filtering": 0,
+    "gold_ingestion_unit_count": 0,
+    "effective_pool_after_holdouts": 0,
+    "base_distractor_doc_count": "PENDING",
+    "base_distractor_chunk_count": 50000,
+    "field_mapping": {
+      "question": "_id",
+      "answer": "answer"
+    },
+    "notes": "Filtered by: non-empty question, answer, and evidence fields"
+  }
+}

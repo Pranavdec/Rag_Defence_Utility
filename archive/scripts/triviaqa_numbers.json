@@ -1,0 +1,9 @@
+{
+  "triviaqa": {
+    "raw_source_count": 17944,
+    "usable_count_after_filtering": 16137,
+    "gold_ingestion_unit_count": 29167,
+    "base_distractor_chunk_count": 50000,
+    "filtering_rate": "89.93%"
+  }
+}
